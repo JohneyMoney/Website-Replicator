@@ -232,11 +232,18 @@ window.fetch = function (input, init) {
   const e = (method === 'GET' || method === 'HEAD') ? find(url) : null;
   if (e) return Promise.resolve(new Response(method === 'HEAD' ? null : bytes(e),
     {status: 200, headers: {'Content-Type': e.mime}}));
+  console.warn('[offline copy] not captured:', method, url);
   return Promise.resolve(new Response('', {status: 404, statusText: 'Not in offline copy'}));
 };
 const nativeOpen = XMLHttpRequest.prototype.open;
 XMLHttpRequest.prototype.open = function (method, url, ...rest) {
   const e = String(method).toUpperCase() === 'GET' && !SKIP.test(String(url)) ? find(url) : null;
+  if (!e && String(method).toUpperCase() === 'GET' && !SKIP.test(String(url))) {
+    console.warn('[offline copy] not captured:', method, url);  // behave like the server's 404
+    Object.defineProperty(this, 'status', {configurable: true, get: () => 404});
+    Object.defineProperty(this, 'statusText', {configurable: true, get: () => 'Not Found'});
+    return nativeOpen.call(this, method, blobUrl('', 'text/plain'), ...rest);
+  }
   return nativeOpen.call(this, method, e ? blobUrl(bytes(e), e.mime) : url, ...rest);
 };
 function hook(proto, prop, convert) {
@@ -251,6 +258,52 @@ for (const [owner, prop] of [[Node.prototype, 'textContent'], [Element.prototype
   Object.defineProperty(HTMLStyleElement.prototype, prop,
     {...d, set(v) { d.set.call(this, css(String(v ?? ''))); }});
 }
+// CSS, fonts and HTML added by scripts are rewritten before the browser can request anything.
+const hasUrl = s => /url\(|@import/i.test(s);
+for (const name of ['appendChild', 'insertBefore']) {
+  const native = Node.prototype[name];
+  Node.prototype[name] = function (node, ...rest) {
+    if (node && node.nodeType === 3 && this.localName === 'style' && hasUrl(node.data)) node.data = css(node.data);
+    else if (node && node.nodeType === 1 && node.localName === 'style') rewrite(node);
+    return native.call(this, node, ...rest);
+  };
+}
+const nativeInsertRule = CSSStyleSheet.prototype.insertRule;
+CSSStyleSheet.prototype.insertRule = function (rule, ...rest) {
+  return nativeInsertRule.call(this, css(String(rule)), ...rest);
+};
+for (const name of ['replace', 'replaceSync']) {
+  const native = CSSStyleSheet.prototype[name];
+  if (native) CSSStyleSheet.prototype[name] = function (text) { return native.call(this, css(String(text))); };
+}
+const nativeSetProperty = CSSStyleDeclaration.prototype.setProperty;
+CSSStyleDeclaration.prototype.setProperty = function (name, value, ...rest) {
+  return nativeSetProperty.call(this, name, /url\(/i.test(value) ? css(String(value)) : value, ...rest);
+};
+hook(CSSStyleDeclaration.prototype, 'cssText', v => css(String(v)));
+for (const prop of ['backgroundImage', 'background', 'maskImage', 'borderImageSource', 'listStyleImage'])
+  hook(CSSStyleDeclaration.prototype, prop, v => /url\(/i.test(v) ? css(String(v)) : v);
+if (window.FontFace) {
+  const NativeFontFace = FontFace;
+  window.FontFace = function (family, source, descriptors) {
+    return new NativeFontFace(family, typeof source === 'string' ? css(source) : source, descriptors);
+  };
+  window.FontFace.prototype = NativeFontFace.prototype;
+}
+{
+  const d = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+  Object.defineProperty(Element.prototype, 'innerHTML', {...d, set(value) {
+    let html = value;
+    if (this.namespaceURI === 'http://www.w3.org/1999/xhtml' && this.localName !== 'template' &&
+        /<(?:style|link|img|source|video|audio)\b|url\(/i.test(String(value))) {
+      const t = document.createElement('template');
+      d.set.call(t, String(value));
+      t.content.querySelectorAll('*').forEach(rewrite);
+      html = d.get.call(t);
+    }
+    d.set.call(this, html);
+  }});
+}
 hook(HTMLLinkElement.prototype, 'href', v => map(v));
 hook(HTMLVideoElement.prototype, 'poster', v => map(v));
 hook(HTMLImageElement.prototype, 'srcset', v => mapSrcset(v));
@@ -262,67 +315,105 @@ Element.prototype.setAttribute = function (name, value) {
   else if (n === 'style' && /url\(/i.test(value)) value = css(String(value));
   return nativeSetAttribute.call(this, name, value);
 };
-// Workers have their own fetch, so each one starts with a table of the embedded files.
-let workerFiles = null;
-function workerTable() {
-  if (workerFiles) return workerFiles;
-  workerFiles = {};
-  for (const e of new Set(ALL.values())) {
-    e.raw = e.raw || (isCss(e) || isJs(e) ? blobUrl(bytes(e), e.mime) : assetUrl(e));
-    const u = new URL(e.url);
-    workerFiles[u.origin + u.pathname] = e.raw;
-    workerFiles[e.url] = e.raw;
+// Workers cannot read this page's blobs from file://, so they ask the page for each file.
+function workerPrelude(base, source) {
+  const scripts = {};
+  if (source.includes('importScripts')) for (const e of new Set(ALL.values())) {
+    if (isJs(e)) { const u = new URL(e.url); scripts[e.url] = scripts[u.origin + u.pathname] = e.b64; }
   }
-  return workerFiles;
-}
-function workerPrelude(base) {
   return `(() => {
-const FILES = ${JSON.stringify(workerTable())}, BASE = ${JSON.stringify(base)};
+const BASE = ${JSON.stringify(base)}, SCRIPTS = ${JSON.stringify(scripts)}, waiting = new Map(), queue = [];
+let port = null, nextId = 1;
 self.__replicatorLocation = new URL(BASE);
-const lookup = v => { try { const x = new URL(v, BASE); x.hash = '';
-  return FILES[x.href] || FILES[x.origin + x.pathname] || null; } catch { return null; } };
 const local = v => /^(data|blob):/i.test(v);
+const abs = v => { try { const x = new URL(v, BASE); x.hash = ''; return x.href; } catch { return null; } };
+const ask = url => new Promise(done => {
+  const id = nextId++, msg = {id, url};
+  waiting.set(id, done);
+  if (port) port.postMessage(msg); else queue.push(msg);
+});
+self.addEventListener('message', e => {
+  if (!e.data || !e.data.__replicator_port) return;
+  e.stopImmediatePropagation();
+  port = e.data.__replicator_port;
+  port.onmessage = m => { const done = waiting.get(m.data.id); waiting.delete(m.data.id); done(m.data); };
+  queue.splice(0).forEach(msg => port.postMessage(msg));
+});
 const nativeFetch = self.fetch;
-self.fetch = (input, init) => {
+self.fetch = async (input, init) => {
   const req = input instanceof Request ? input : null;
   const url = req ? req.url : String(input && input.href || input);
   if (local(url)) return nativeFetch(input, init);
   const method = String(init && init.method || req && req.method || 'GET').toUpperCase();
-  const hit = method === 'GET' || method === 'HEAD' ? lookup(url) : null;
-  return hit ? nativeFetch(hit) : Promise.resolve(new Response('', {status: 404}));
+  const hit = method === 'GET' || method === 'HEAD' ? await ask(abs(url)) : {};
+  if (hit.buffer) return new Response(method === 'HEAD' ? null : hit.buffer, {status: 200, headers: {'Content-Type': hit.mime}});
+  console.warn('[offline copy] worker, not captured:', method, url);
+  return new Response('', {status: 404});
 };
 if (self.XMLHttpRequest) {
-  const open = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-    return open.call(this, method, local(String(url)) ? url : lookup(url) || url, ...rest);
+  const P = XMLHttpRequest.prototype, open = P.open, send = P.send, setHeader = P.setRequestHeader;
+  P.open = function (method, url, isAsync, ...rest) {
+    this.__replicator = null;
+    if (String(method).toUpperCase() !== 'GET' || isAsync === false || local(String(url)))
+      return open.call(this, method, url, isAsync === undefined ? true : isAsync, ...rest);
+    this.__replicator = {method, url: abs(url)};
+  };
+  P.setRequestHeader = function (...args) { if (!this.__replicator) return setHeader.apply(this, args); };
+  P.send = function (body) {
+    const pending = this.__replicator;
+    if (!pending) return send.call(this, body);
+    ask(pending.url).then(hit => {
+      if (!hit.buffer) {
+        console.warn('[offline copy] worker, not captured:', pending.url);
+        Object.defineProperty(this, 'status', {get: () => 404});
+        Object.defineProperty(this, 'statusText', {get: () => 'Not Found'});
+      }
+      open.call(this, 'GET', URL.createObjectURL(new Blob(hit.buffer ? [hit.buffer] : [], {type: hit.mime || ''})), true);
+      send.call(this);
+    });
   };
 }
 if (self.importScripts) {
   const load = self.importScripts;
-  self.importScripts = (...urls) => load(...urls.map(u => local(String(u)) ? u : lookup(u) || u));
+  self.importScripts = (...urls) => load(...urls.map(u => {
+    const a = local(String(u)) ? null : abs(u), x = a && new URL(a);
+    const b64 = a && (SCRIPTS[a] || SCRIPTS[x.origin + x.pathname]);
+    if (!b64) return u;
+    const s = atob(b64), out = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+    return URL.createObjectURL(new Blob([out], {type: 'text/javascript'}));
+  }));
 }
 })();\n`;
 }
-function workerUrl(url, opts) {
-  if (opts && opts.type === 'module') return map(url);
-  let src, base = BASE;
+function workerSource(url, opts) {
+  if (opts && opts.type === 'module') return null;
   if (/^blob:/i.test(url)) {
     const x = new XMLHttpRequest();
     nativeOpen.call(x, 'GET', url, false);
     x.send();
-    src = x.responseText;
-  } else {
-    const e = SKIP.test(url) ? null : find(url);
-    if (!e) return url;
-    src = patchJs(text(e));
-    base = e.url;
+    return {src: x.responseText, base: BASE};
   }
-  return blobUrl(workerPrelude(base) + src, 'text/javascript');
+  const e = SKIP.test(url) ? null : find(url);
+  return e ? {src: patchJs(text(e)), base: e.url} : null;
 }
 if (window.Worker) {
   const NativeWorker = Worker;
   window.Worker = class extends NativeWorker {
-    constructor(url, opts) { super(workerUrl(String(url?.href ?? url), opts), opts); }
+    constructor(url, opts) {
+      const target = String(url?.href ?? url), code = workerSource(target, opts);
+      super(code ? blobUrl(workerPrelude(code.base, code.src) + code.src, 'text/javascript')
+                 : (opts && opts.type === 'module' ? map(target) : target), opts);
+      if (!code) return;
+      const channel = new MessageChannel();
+      channel.port1.onmessage = ev => {
+        const e = find(ev.data.url);
+        if (!e) { channel.port1.postMessage({id: ev.data.id}); return; }
+        const buffer = bytes(e).buffer;
+        channel.port1.postMessage({id: ev.data.id, buffer, mime: e.mime}, [buffer]);
+      };
+      NativeWorker.prototype.postMessage.call(this, {__replicator_port: channel.port2}, [channel.port2]);
+    }
   };
 }
 for (const name of ['pushState', 'replaceState']) {
