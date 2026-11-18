@@ -30,6 +30,7 @@ python -m replicator html <archive> out.html
 
 In "Play Offline", open the **⚡ Replicator** button at the bottom right.
 
+- **Full Editor** (Alt+E): click any element to change its text, style, link or image, drag it to move it, duplicate or delete it, add new elements, or edit its HTML. The **3D** tab controls objects in Three.js scenes: visibility, position, rotation, scale, color, opacity and the camera. Includes undo, redo and reset.
 - **Edit Text** (Alt+T): click text on the page, or edit the list of text drawn into canvas and WebGL. Text from MSDF or bitmap 3D fonts is changed by typing it exactly as shown; the app warns if the font has no glyph for a new character.
 - **Replace Images, Video, Audio & More**: swap images, GIFs, video, audio, fonts, `.glb`/`.gltf` models and Basis-compressed `.ktx2` textures. Use **Replace with text** on logos stored as distance-field `.ktx2` textures (needs Python 3.14). The original is kept so you can restore it. Draco `.drc` geometry, `.basis` files and text modelled into 3D geometry cannot be changed this way.
 

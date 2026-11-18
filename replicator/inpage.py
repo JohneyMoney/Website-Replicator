@@ -230,7 +230,8 @@ INPAGE_TOOLS_JS = r"""
         <span>⚡ Replicator Tools</span>
         <span id="rep_close" style="cursor:pointer;color:#94a3b8">&times;</span>
       </div>
-      <button class="rep-btn rep-btn-primary" id="rep_text_btn">✏️ Edit Text, also 3D/WebGL (Alt+T)</button>
+      <button class="rep-btn rep-btn-primary" id="rep_editor_btn">🎛 Full Editor (Alt+E)</button>
+      <button class="rep-btn" id="rep_text_btn">✏️ Edit Text, also 3D/WebGL (Alt+T)</button>
       <button class="rep-btn" id="rep_images_btn">🖼 Replace Images, Video, Audio &amp; More</button>
       <button class="rep-btn" id="rep_zap_btn">🎯 Zap Element (Alt+Z)</button>
       <button class="rep-btn" id="rep_unlock_btn">🔓 Unlock Page Scroll</button>
@@ -358,6 +359,10 @@ INPAGE_TOOLS_JS = r"""
     });
 
     shadow.getElementById('rep_zap_btn').addEventListener('click', () => startZapping());
+    shadow.getElementById('rep_editor_btn').addEventListener('click', () => {
+      panel.classList.remove('open');
+      window.__replicator_editor.open();
+    });
     shadow.getElementById('rep_text_btn').addEventListener('click', () => openTextEditor());
     shadow.getElementById('rep_images_btn').addEventListener('click', () => openImageEditor());
 

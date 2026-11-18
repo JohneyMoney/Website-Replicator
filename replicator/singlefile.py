@@ -11,6 +11,7 @@ import html
 import json
 from pathlib import Path
 
+from .control import control_tag_content
 from .textedit import text_runtime_tag_content
 from .util import guess_mime, header_value, human_size
 
@@ -63,6 +64,7 @@ def export_single_html(archive, out_path, log=print) -> Path:
                 f.write(("," if count else "") + f'[{_json(r["url"])},{_json(mime)},"{body}"]')
                 count += 1
             f.write("]}</script>\n<script>" + text_runtime_tag_content(archive.get_text_rules())
+                    + "</script>\n<script>" + control_tag_content(archive.get_page_edits())
                     + "</script>\n<script>" + BOOT_JS + "</script>\n</head>"
                     "<body><p>Loading offline copy...</p></body></html>\n")
         tmp.replace(out_path)
@@ -481,8 +483,10 @@ function render(page) {
   if (D.css.trim()) doc.head.append(Object.assign(doc.createElement('style'), {textContent: css(D.css)}));
   if (D.js.trim()) importMap.after(Object.assign(doc.createElement('script'), {textContent: patchJs(D.js)}));
 
+  window.__replicator_page = new URL(BASE).pathname;
   document.open();
   window.__replicator_text.watch();
+  window.__replicator_control.watch();
   window.addEventListener('click', onLinkClick);
   new MutationObserver(records => {
     for (const r of records) {

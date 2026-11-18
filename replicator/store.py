@@ -720,6 +720,23 @@ class Archive:
         return False
 
     # --------------------------------------------------------- visual edits
+    def get_page_edits(self) -> list[dict]:
+        """Edits made in the visual editor, applied in order when a page loads."""
+        p = _win_path(self.dir / "page_edits.json")
+        if not p.exists():
+            return []
+        try:
+            data = json.loads(p.read_text("utf-8"))
+        except (OSError, ValueError):
+            return []
+        return [o for o in data if isinstance(o, dict) and o.get("kind")] if isinstance(data, list) else []
+
+    def save_page_edits(self, ops: list[dict]) -> None:
+        if not isinstance(ops, list) or not all(isinstance(o, dict) and o.get("kind") for o in ops):
+            raise ValueError("Invalid edit list")
+        with self._lock:
+            _write(self.dir / "page_edits.json", json.dumps(ops, ensure_ascii=False).encode("utf-8"))
+
     def get_text_rules(self) -> list[dict]:
         """Saved text edits: [{"from": old, "to": new}, ...]."""
         p = _win_path(self.dir / "text_rules.json")

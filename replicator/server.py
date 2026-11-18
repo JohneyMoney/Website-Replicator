@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 from urllib.parse import parse_qs, quote, urlsplit
 
+from .control import EDITOR_JS, control_tag_content
 from .inpage import INPAGE_TOOLS_JS
 from .store import Archive
 from .textedit import text_runtime_tag_content
@@ -295,7 +296,7 @@ class ReplayServer:
                               json.dumps({"ok": True, "removed": removed}).encode())
         if path.split("?", 1)[0] in ("/__replicator/text", "/__replicator/images",
                                      "/__replicator/image", "/__replicator/image_restore",
-                                     "/__replicator/texture"):
+                                     "/__replicator/texture", "/__replicator/edits"):
             return self._edit_api(h, path, method)
         if path.startswith("/__replicator/overrides"):
             if method == "POST":
@@ -372,12 +373,15 @@ class ReplayServer:
         if "html" in ctype.lower() and row["status"] == 200:
             overrides = self.archive.get_overrides()
             tags = [self._guard, b"\n<script id=\"__replicator_text_runtime\">\n"
-                    + text_runtime_tag_content(self.archive.get_text_rules()).encode("utf-8") + b"\n</script>"]
+                    + text_runtime_tag_content(self.archive.get_text_rules()).encode("utf-8") + b"\n</script>",
+                    b"\n<script id=\"__replicator_control_runtime\">\n"
+                    + control_tag_content(self.archive.get_page_edits()).encode("utf-8") + b"\n</script>"]
             if overrides.get("css", "").strip():
                 tags.append(b"\n<style id=\"__replicator_overrides_css\">\n" + overrides["css"].encode("utf-8") + b"\n</style>")
             if overrides.get("js", "").strip():
                 tags.append(b"\n<script id=\"__replicator_overrides_js\">\n" + overrides["js"].encode("utf-8") + b"\n</script>")
             tags.append(b"\n<script id=\"__replicator_inpage_tools\">\n" + INPAGE_TOOLS_JS.encode("utf-8") + b"\n</script>")
+            tags.append(b"\n<script id=\"__replicator_editor_js\">\n" + EDITOR_JS.encode("utf-8") + b"\n</script>")
             body = inject_guard(body, b"".join(tags))
 
         status = row["status"]
@@ -421,6 +425,10 @@ class ReplayServer:
                 result = self.archive.set_text_rule(str(data["from"]), str(data["to"]))
                 self.log(f"  [TEXT] {short(str(data['from']), 40)} -> {short(str(data['to']), 40)}")
                 return reply(200, result)
+            if route == "edits":
+                if method == "POST":
+                    self.archive.save_page_edits(json.loads(raw.decode("utf-8"))["ops"])
+                return reply(200, {"ops": self.archive.get_page_edits()})
             if route == "images":
                 result = self.archive.list_images()
                 for item in result["images"]:
