@@ -112,6 +112,7 @@ class App(tk.Tk):
         ttk.Button(btns, text="Overrides & Mocks...", command=self.open_overrides).pack(fill="x", pady=2)
         ttk.Button(btns, text="Export files to folder", command=self.export_files).pack(fill="x", pady=2)
         ttk.Button(btns, text="Sync files -> DB", command=self.sync_files).pack(fill="x", pady=2)
+        ttk.Button(btns, text="Export single HTML...", command=self.export_single_html).pack(fill="x", pady=2)
         ttk.Button(btns, text="Export package (.zip)...", command=self.export_package).pack(fill="x", pady=2)
         ttk.Button(btns, text="Export HAR...", command=self.export_har).pack(fill="x", pady=2)
         ttk.Button(btns, text="Open folder", command=self.open_folder).pack(fill="x", pady=2)
@@ -335,6 +336,25 @@ class App(tk.Tk):
                 os.startfile(a.dir)
             except Exception as e:
                 self.log(f"Export failed: {e}")
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def export_single_html(self):
+        a = self.selected_archive()
+        if not a:
+            return
+        out = filedialog.asksaveasfilename(defaultextension=".html", initialfile=f"{a.name}.html",
+                                           filetypes=[("HTML file", "*.html")])
+        if not out:
+            return
+
+        def run():
+            try:
+                self.log("Building single HTML file...")
+                a.export_single_html(out, log=self.log)
+                os.startfile(os.path.dirname(out))
+            except Exception as e:
+                self.log(f"Single HTML export failed: {e}")
 
         threading.Thread(target=run, daemon=True).start()
 

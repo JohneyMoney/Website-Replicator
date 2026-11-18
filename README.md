@@ -23,7 +23,21 @@ python -m replicator serve <archive>
 python -m replicator exact <archive>
 python -m replicator list
 python -m replicator har <archive> out.har
+python -m replicator html <archive> out.html
 ```
+
+## Editing text and images, including WebGL
+
+In "Play Offline", open the **⚡ Replicator** button at the bottom right.
+
+- **Edit Text** (Alt+T): click text on the page, or edit the list of text drawn into canvas and WebGL. Text from MSDF or bitmap 3D fonts is changed by typing it exactly as shown; the app warns if the font has no glyph for a new character.
+- **Replace Images & Textures**: swap PNG, JPEG or WebP files. The original is kept so you can restore it. Compressed GPU textures (`.ktx2`, `.basis`) and text modelled into 3D geometry cannot be changed this way.
+
+Edits are saved in the archive and included in **Export single HTML...**.
+
+## Single HTML file
+
+**Export single HTML...** puts the captured site into one `.html` file that opens by double-click, without Python or a server. Files are embedded as base64, so the result is about a third larger than the capture, and sites over 350 MB must use the zip package instead. Code that depends on the real `location` (for example path-based routers) can behave differently from `file://`; use "Play Offline" for those sites.
 
 ## Limits
 

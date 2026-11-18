@@ -718,6 +718,190 @@ class Archive:
                 return True
         return False
 
+    # --------------------------------------------------------- visual edits
+    def get_text_rules(self) -> list[dict]:
+        """Saved text edits: [{"from": old, "to": new}, ...]."""
+        p = _win_path(self.dir / "text_rules.json")
+        if not p.exists():
+            return []
+        try:
+            return [r for r in json.loads(p.read_text("utf-8")) if r.get("from")]
+        except (OSError, ValueError, AttributeError):
+            return []
+
+    def set_text_rule(self, find_text: str, replace_text: str) -> dict:
+        """Add or change one text edit. Setting a text back to itself removes the edit."""
+        if not find_text:
+            raise ValueError("Empty text")
+        with self._lock:
+            rules = self.get_text_rules()
+            # One visible text can have several sources ("Shop" and "SHOP"): edit them together.
+            originals = [r["from"] for r in rules if r["to"] == find_text] or [find_text]
+            original = originals[0]
+            rules = [r for r in rules if r["from"] not in originals]
+            if replace_text not in originals:
+                rules.extend({"from": o, "to": replace_text} for o in originals)
+            _write(self.dir / "text_rules.json", json.dumps(rules, ensure_ascii=False, indent=2).encode("utf-8"))
+        self._text_cache = {}
+        return {"from": original, "rules": rules, "source_files": self._text_rule_files(original),
+                "missing": self._missing_glyphs(replace_text), "was_edit": original != find_text}
+
+    def apply_text_rules(self, row, body: bytes) -> bytes:
+        """Apply saved text edits to a served text file (HTML, JS, JSON, SVG...)."""
+        rules = self.get_text_rules()
+        if not rules or row["status"] != 200 or not is_editable_text(row["mime"], row["url"]):
+            return body
+        rules = sorted(rules, key=lambda r: -len(r["from"]))
+        needles = [r for r in rules if r["from"].encode("utf-8") in body]
+        if not needles:
+            return body
+        import zlib
+        key = (row["url"], zlib.crc32(body), json.dumps(needles, sort_keys=True))
+        cache = self.__dict__.setdefault("_text_cache", {})
+        if key not in cache:
+            cache[key] = self._replace_rules(row, body, needles)[0]
+        return cache[key]
+
+    @staticmethod
+    def _replace_rules(row, body: bytes, rules: list[dict]) -> tuple[bytes, int]:
+        from .text_replace import safe_replace_in_content
+        try:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError:
+            return body, 0
+        total = 0
+        is_html = "html" in (row["mime"] or "").lower()
+
+        def inline_script(m):
+            nonlocal total
+            code, n = safe_replace_in_content(m.group(2), r["from"], r["to"].replace("</", "<\\/"),
+                                              mime="text/javascript", case_sensitive=True, whole_word=True)
+            total += n
+            return m.group(1) + code + m.group(3)
+
+        for r in rules:
+            text, n = safe_replace_in_content(text, r["from"], r["to"], mime=row["mime"] or "",
+                                              url=row["url"], case_sensitive=True, whole_word=True)
+            total += n
+            if is_html:  # the HTML replacer leaves <script> contents alone
+                text = _INLINE_SCRIPT.sub(inline_script, text)
+        return (text.encode("utf-8"), total) if total else (body, 0)
+
+    def _text_rows(self, conn):
+        for row in conn.execute("SELECT * FROM responses WHERE method='GET' AND status=200 AND body IS NOT NULL"):
+            if is_editable_text(row["mime"], row["url"]):
+                yield row
+
+    def _text_rule_files(self, find_text: str) -> int:
+        conn = self.connect()
+        rule, needle, found = {"from": find_text, "to": find_text + "\0"}, find_text.encode("utf-8"), 0
+        try:
+            for row in self._text_rows(conn):
+                body = self.body_for(row)
+                if needle in body and self._replace_rules(row, body, [rule])[1]:
+                    found += 1
+        finally:
+            conn.close()
+        return found
+
+    def _missing_glyphs(self, text: str) -> list[str]:
+        """Characters absent from every MSDF/bitmap font atlas in the archive (empty if no atlas)."""
+        conn, known = self.connect(), set()
+
+        def glyph_char(g):
+            code = g.get("unicode", g.get("id"))
+            return g.get("char") or g.get("letter") or (chr(int(code)) if code is not None else None)
+
+        def collect(node):
+            if isinstance(node, list):
+                for item in node:
+                    collect(item)
+            elif isinstance(node, dict):
+                for key, value in node.items():
+                    if key in ("chars", "glyphs"):
+                        glyphs = value.values() if isinstance(value, dict) else value
+                        if isinstance(glyphs, (list, type({}.values()))):
+                            known.update(c for g in glyphs if isinstance(g, dict)
+                                         for c in [glyph_char(g)] if c)
+                    else:
+                        collect(value)
+
+        try:
+            for row in self._text_rows(conn):
+                body = self.body_for(row)
+                is_font = (b'"chars"' in body and b'"xadvance"' in body) or (b'"glyphs"' in body and b'"unicode"' in body)
+                if not is_font or "json" not in (row["mime"] or "").lower():
+                    continue
+                try:
+                    collect(json.loads(body))
+                except (ValueError, TypeError, OverflowError):
+                    continue
+        finally:
+            conn.close()
+        return sorted({c for c in text if not c.isspace() and c not in known}) if known else []
+
+    def _original_path(self, url: str) -> Path:
+        return self.dir / "originals" / (hashlib.sha1(url.encode("utf-8")).hexdigest() + ".bin")
+
+    def list_images(self) -> dict:
+        """Replaceable images/textures, one entry per distinct file."""
+        conn, items, seen, compressed = self.connect(), [], set(), 0
+        try:
+            for r in conn.execute("SELECT url, mime, body FROM responses WHERE method='GET' AND status=200 "
+                                  "AND body IS NOT NULL ORDER BY id"):
+                path = urlsplit(r["url"]).path.lower()
+                if path.endswith((".ktx2", ".basis", ".dds")):
+                    compressed += 1
+                    continue
+                mime = (r["mime"] or "").split(";")[0].strip().lower()
+                if mime not in ("image/png", "image/jpeg", "image/webp"):
+                    continue
+                digest = hashlib.sha1(r["body"]).digest()
+                if digest not in seen:
+                    seen.add(digest)
+                    items.append({"url": r["url"], "mime": mime, "size": len(r["body"]),
+                                  "edited": _win_path(self._original_path(r["url"])).exists()})
+        finally:
+            conn.close()
+        return {"images": items, "compressed": compressed}
+
+    def _same_file_urls(self, conn, url: str) -> list[str]:
+        row = conn.execute("SELECT body FROM responses WHERE method='GET' AND status=200 AND url=?",
+                           (url,)).fetchone()
+        if row is None or row["body"] is None:
+            raise KeyError(url)
+        return [r["url"] for r in conn.execute(
+            "SELECT url FROM responses WHERE method='GET' AND status=200 AND body=?", (row["body"],))]
+
+    def replace_image(self, url: str, data: bytes) -> int:
+        """Replace an image everywhere it occurs, keeping the original for restore_image()."""
+        conn = self.connect()
+        try:
+            urls = self._same_file_urls(conn, url)
+            for u in urls:
+                backup = self._original_path(u)
+                if not _win_path(backup).exists():
+                    row = conn.execute("SELECT body FROM responses WHERE method='GET' AND status=200 AND url=?",
+                                       (u,)).fetchone()
+                    _write(backup, row["body"])
+                self.save_entry_bytes(u, data, conn)
+            return len(urls)
+        finally:
+            conn.close()
+
+    def restore_image(self, url: str) -> int:
+        conn, restored = self.connect(), 0
+        try:
+            for u in self._same_file_urls(conn, url):
+                backup = _win_path(self._original_path(u))
+                if backup.exists():
+                    self.save_entry_bytes(u, backup.read_bytes(), conn)
+                    backup.unlink()
+                    restored += 1
+            return restored
+        finally:
+            conn.close()
+
     def write_launcher(self) -> None:
         """Make the archive folder a self-contained package that works without the app:
         a copy of the (stdlib-only) replay engine, 'Open website.bat' and an index.html."""
@@ -774,6 +958,11 @@ pause
             "and fetch() on file:// pages, so modern sites must be served over http://.\n",
             encoding="utf-8")
 
+    def export_single_html(self, out_path: Path, log=print) -> Path:
+        """Write the whole site into one .html file that opens by double-click."""
+        from .singlefile import export_single_html
+        return export_single_html(self, out_path, log=log)
+
     def export_package(self, zip_path: Path, log=print) -> Path:
         """Zip the whole self-contained package (everything in the archive folder)."""
         import zipfile
@@ -827,6 +1016,7 @@ ping(); setInterval(ping, 1500);
 </script></body></html>
 """
 
+_INLINE_SCRIPT = re.compile(r"(<script\b(?![^>]*\bsrc\s*=)[^>]*>)(.*?)(</script\s*>)", re.I | re.S)
 _BAD_CHARS = re.compile(r'[<>:"|?*\\\x00-\x1f]')
 _RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 TEXT_MIMES = ("text/", "javascript", "ecmascript", "json", "xml", "svg", "xhtml", "css", "html")

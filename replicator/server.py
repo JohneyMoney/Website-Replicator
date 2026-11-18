@@ -19,14 +19,16 @@ import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from .inpage import INPAGE_TOOLS_JS
 from .store import Archive
+from .textedit import text_runtime_tag_content
 from .util import (origin_of, path_query, pick_port, preferred_port, replay_headers,
                    short)
 
 SW_PATH = "/__replicator_sw.js"
+MAX_EDIT_UPLOAD = 64 * 1024 * 1024
 
 SERVICE_WORKER_JS = r"""
 // Website Replicator service worker: re-route cross-origin requests to the local archive.
@@ -291,6 +293,9 @@ class ReplayServer:
                 self.log(f"  [UNDO] Removed override: {removed[:70]}")
             return self._send(h, 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")],
                               json.dumps({"ok": True, "removed": removed}).encode())
+        if path.split("?", 1)[0] in ("/__replicator/text", "/__replicator/images",
+                                     "/__replicator/image", "/__replicator/image_restore"):
+            return self._edit_api(h, path, method)
         if path.startswith("/__replicator/overrides"):
             if method == "POST":
                 length = int(h.headers.get("Content-Length") or 0)
@@ -360,12 +365,13 @@ class ReplayServer:
             self.misses.append(f"{method} {target} (over size limit at capture)")
         self.hits += 1
 
-        body: bytes = self.archive.body_for(row)
+        body: bytes = self.archive.apply_text_rules(row, self.archive.body_for(row))
         pairs = replay_headers(json.loads(row["resp_headers"]), row["url"])
         ctype = next((v for k, v in pairs if k.lower() == "content-type"), "")
         if "html" in ctype.lower() and row["status"] == 200:
             overrides = self.archive.get_overrides()
-            tags = [self._guard]
+            tags = [self._guard, b"\n<script id=\"__replicator_text_runtime\">\n"
+                    + text_runtime_tag_content(self.archive.get_text_rules()).encode("utf-8") + b"\n</script>"]
             if overrides.get("css", "").strip():
                 tags.append(b"\n<style id=\"__replicator_overrides_css\">\n" + overrides["css"].encode("utf-8") + b"\n</style>")
             if overrides.get("js", "").strip():
@@ -386,6 +392,51 @@ class ReplayServer:
                 return self._send(h, 206, pairs + [("Content-Range", f"bytes {start}-{end}/{len(body)}")],
                                   body[start:end + 1])
         self._send(h, status, pairs, body, row["status_text"] or None)
+
+    def _local_url(self, url: str) -> str:
+        s = urlsplit(url)
+        origin = f"{s.scheme}://{s.netloc}"
+        tail = path_query(url)
+        return tail if origin == self.primary_origin else f"/__ext__/{s.scheme}/{s.netloc}{tail}"
+
+    def _edit_api(self, h: BaseHTTPRequestHandler, path: str, method: str) -> None:
+        """Endpoints behind the in-page text and image editors (same-origin callers only)."""
+        def reply(status: int, data: dict):
+            self._send(h, status, [("Content-Type", "application/json"), ("Cache-Control", "no-store")],
+                       json.dumps(data, ensure_ascii=False).encode("utf-8"))
+
+        if h.headers.get("Sec-Fetch-Site", "same-origin") not in ("same-origin", "none"):
+            return reply(403, {"error": "Only the offline page itself may edit this archive."})
+        route = path.split("?", 1)[0].rsplit("/", 1)[1]
+        length = int(h.headers.get("Content-Length") or 0)
+        if length > MAX_EDIT_UPLOAD:
+            return reply(413, {"error": "File is too large."})
+        raw = h.rfile.read(length) if length else b""
+        try:
+            if route == "text":
+                if method != "POST":
+                    return reply(200, {"rules": self.archive.get_text_rules()})
+                data = json.loads(raw.decode("utf-8"))
+                result = self.archive.set_text_rule(str(data["from"]), str(data["to"]))
+                self.log(f"  [TEXT] {short(str(data['from']), 40)} -> {short(str(data['to']), 40)}")
+                return reply(200, result)
+            if route == "images":
+                result = self.archive.list_images()
+                for item in result["images"]:
+                    item["local"] = self._local_url(item["url"])
+                return reply(200, result)
+            if method != "POST":
+                return reply(405, {"error": "POST required."})
+            if route == "image":
+                url = parse_qs(urlsplit(path).query).get("url", [""])[0]
+                if not raw:
+                    return reply(400, {"error": "No image data."})
+                return reply(200, {"replaced": self.archive.replace_image(url, raw)})
+            return reply(200, {"restored": self.archive.restore_image(str(json.loads(raw.decode("utf-8"))["url"]))})
+        except KeyError:
+            return reply(404, {"error": "Not found in this archive."})
+        except ValueError as e:
+            return reply(400, {"error": str(e)})
 
     def _target_url(self, path: str) -> str:
         if path.startswith("/__ext__/"):

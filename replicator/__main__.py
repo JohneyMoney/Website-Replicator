@@ -5,6 +5,7 @@
     python -m replicator exact <archive-name>          # Playwright Chromium, original origin
     python -m replicator list
     python -m replicator har <archive-name> out.har
+    python -m replicator html <archive-name> out.html  # one file, opens by double-click
 """
 from __future__ import annotations
 
@@ -48,6 +49,10 @@ def main(argv=None) -> int:
     h = sub.add_parser("har", help="export an archive as a HAR file")
     h.add_argument("archive")
     h.add_argument("out")
+
+    sh = sub.add_parser("html", help="export an archive as one double-clickable HTML file")
+    sh.add_argument("archive")
+    sh.add_argument("out")
 
     ex = sub.add_parser("export", help="export captured files to <archive>/files/")
     ex.add_argument("archive")
@@ -99,6 +104,8 @@ def main(argv=None) -> int:
             print(f"  {arc.name:45} {st['files']:6} files {human_size(st['bytes']):>10}  {m.get('start_url', '?')}")
     elif a.cmd == "har":
         print(Archive.open(a.archive).export_har(a.out))
+    elif a.cmd == "html":
+        Archive.open(a.archive).export_single_html(a.out)
     elif a.cmd == "export":
         Archive.open(a.archive).export_files()
     elif a.cmd == "sync":

@@ -38,9 +38,12 @@ _SINGLE_TOKEN_SKIP_RE = re.compile(
 _JS_ESCAPE_RE = re.compile(r"\\(?:u[0-9a-fA-F]{4}|u\{[0-9a-fA-F]+\}|x[0-9a-fA-F]{2}|.)")
 
 
-def _compile_find(find_text: str, case_sensitive: bool) -> re.Pattern[str]:
+def _compile_find(find_text: str, case_sensitive: bool, whole_word: bool = False) -> re.Pattern[str]:
     flags = 0 if case_sensitive else re.IGNORECASE
-    return re.compile(re.escape(find_text), flags)
+    pattern = re.escape(find_text)
+    if whole_word:
+        pattern = rf"(?<!\w){pattern}(?!\w)"
+    return re.compile(pattern, flags)
 
 
 def _replace_prose(
@@ -365,6 +368,7 @@ def safe_replace_in_content(
     mime: str = "",
     url: str = "",
     case_sensitive: bool = False,
+    whole_word: bool = False,
 ) -> tuple[str, int]:
     """Replace `find_text` with `replace_text` in `text` while protecting filenames, URLs,
     CSS selectors, HTML tags/attributes, and JS identifiers."""
@@ -372,7 +376,7 @@ def safe_replace_in_content(
         return text, 0
     m = (mime or "").lower()
     path = url.split("?", 1)[0].lower()
-    find_re = _compile_find(find_text, case_sensitive)
+    find_re = _compile_find(find_text, case_sensitive, whole_word)
 
     # CSS only holds selectors, properties and url(...) paths — skip in safe text mode.
     if "css" in m or path.endswith(".css"):

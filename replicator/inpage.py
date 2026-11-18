@@ -199,6 +199,15 @@ INPAGE_TOOLS_JS = r"""
       }
       textarea:focus, input[type="text"]:focus { outline: 2px solid #2563eb; }
       .rep-row { display: flex; gap: 8px; justify-content: flex-end; }
+      .rep-wide { max-width: 680px; max-height: 86vh; }
+      .rep-list { overflow: auto; display: flex; flex-direction: column; gap: 8px; min-height: 80px; }
+      .rep-item { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; }
+      .rep-item small { grid-column: 1 / -1; color: #94a3b8; font-size: 11px; overflow-wrap: anywhere; }
+      .rep-add { display: grid; grid-template-columns: 1fr 1fr auto; gap: 6px; }
+      .rep-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+      .rep-card { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: #94a3b8; min-width: 0; }
+      .rep-card img { width: 100%; height: 100px; object-fit: contain; background: #1e293b; border-radius: 6px; }
+      .rep-card span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     `;
     shadow.appendChild(style);
 
@@ -216,7 +225,9 @@ INPAGE_TOOLS_JS = r"""
         <span>⚡ Replicator Tools</span>
         <span id="rep_close" style="cursor:pointer;color:#94a3b8">&times;</span>
       </div>
-      <button class="rep-btn rep-btn-primary" id="rep_zap_btn">🎯 Zap Element (Alt+Z)</button>
+      <button class="rep-btn rep-btn-primary" id="rep_text_btn">✏️ Edit Text, also 3D/WebGL (Alt+T)</button>
+      <button class="rep-btn" id="rep_images_btn">🖼 Replace Images &amp; Textures</button>
+      <button class="rep-btn" id="rep_zap_btn">🎯 Zap Element (Alt+Z)</button>
       <button class="rep-btn" id="rep_unlock_btn">🔓 Unlock Page Scroll</button>
       <button class="rep-btn" id="rep_edit_css_btn">📋 Edit CSS Overrides</button>
       <button class="rep-btn" id="rep_edit_js_btn">⚙ JS Function Mocks</button>
@@ -274,13 +285,16 @@ INPAGE_TOOLS_JS = r"""
 
     // ------------------------------------------------------------- Zapper Logic
     let zapping = false;
+    let pickingText = false;
     let hoveredEl = null;
 
-    function startZapping() {
+    function startZapping(forText) {
       zapping = true;
+      pickingText = forText === true;
       panel.classList.remove('open');
       pill.classList.add('active');
-      pill.innerHTML = '<span>✕</span><span>Click an element (Esc)</span>';
+      pill.innerHTML = pickingText ? '<span>✏️</span><span>Click text or 3D (Esc)</span>'
+                                   : '<span>✕</span><span>Click an element (Esc)</span>';
       hl.style.display = 'block';
       document.body.style.cursor = 'crosshair';
     }
@@ -314,7 +328,9 @@ INPAGE_TOOLS_JS = r"""
       e.preventDefault();
       e.stopPropagation();
       const target = hoveredEl || e.target;
+      const forText = pickingText;
       stopZapping();
+      if (forText) { pickText(e, target); return; }
       if (!target || target === document.body || target === document.documentElement) return;
 
       const sel = getBestSelector(target);
@@ -330,10 +346,15 @@ INPAGE_TOOLS_JS = r"""
       } else if (e.altKey && (e.key === 'z' || e.key === 'Z')) {
         e.preventDefault();
         if (zapping) stopZapping(); else startZapping();
+      } else if (e.altKey && (e.key === 't' || e.key === 'T')) {
+        e.preventDefault();
+        if (zapping) stopZapping(); else startZapping(true);
       }
     });
 
-    shadow.getElementById('rep_zap_btn').addEventListener('click', startZapping);
+    shadow.getElementById('rep_zap_btn').addEventListener('click', () => startZapping());
+    shadow.getElementById('rep_text_btn').addEventListener('click', () => openTextEditor());
+    shadow.getElementById('rep_images_btn').addEventListener('click', () => openImageEditor());
 
     // Unlock Scroll
     shadow.getElementById('rep_unlock_btn').addEventListener('click', () => {
@@ -417,6 +438,191 @@ INPAGE_TOOLS_JS = r"""
         );
       });
     });
+
+    // ------------------------------------------------- Text and image editors
+    const mk = (tag, cls, text) => {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text !== undefined) n.textContent = text;
+      return n;
+    };
+    const button = (label, onClick, cls) => {
+      const b = mk('button', 'rep-btn' + (cls ? ' ' + cls : ''), label);
+      b.addEventListener('click', onClick);
+      return b;
+    };
+    const textInput = (value, placeholder) => {
+      const i = mk('input');
+      i.type = 'text';
+      i.value = value || '';
+      i.placeholder = placeholder || '';
+      return i;
+    };
+    async function api(name, body) {
+      const r = await fetch('/__replicator/' + name, body === undefined ? {} : {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'Request failed');
+      return data;
+    }
+    const reloadSoon = ms => setTimeout(() => location.reload(), ms);
+    const drawnText = () => window.__replicator_text ? window.__replicator_text.drawn() : [];
+
+    const editor = mk('div', 'rep-modal');
+    const editorBox = mk('div', 'rep-modal-box rep-wide');
+    const editorTitle = mk('div');
+    editorTitle.style.cssText = 'font-weight:700;font-size:15px';
+    const editorDesc = mk('div');
+    editorDesc.style.cssText = 'font-size:12px;color:#94a3b8;line-height:1.4';
+    const editorTools = mk('div');
+    editorTools.style.cssText = 'display:flex;flex-direction:column;gap:8px';
+    const editorList = mk('div', 'rep-list');
+    const editorFoot = mk('div', 'rep-row');
+    editorFoot.appendChild(button('Close', () => editor.classList.remove('open')));
+    editorBox.append(editorTitle, editorDesc, editorTools, editorList, editorFoot);
+    editor.appendChild(editorBox);
+    shadow.insertBefore(editor, toast);
+
+    function openEditor(title, desc) {
+      editorTitle.textContent = title;
+      editorDesc.textContent = desc;
+      editorTools.replaceChildren();
+      editorList.replaceChildren();
+      panel.classList.remove('open');
+      modal.classList.remove('open');
+      editor.classList.add('open');
+    }
+
+    // CSS can show "Shop" as "SHOP", so find the spelling the page really contains.
+    function realSpelling(text) {
+      const lower = text.toLowerCase();
+      const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let loose = null;
+      while (w.nextNode()) {
+        if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(w.currentNode.parentNode.nodeName)) continue;
+        const v = w.currentNode.nodeValue;
+        if (v.includes(text)) return text;
+        const at = loose ? -1 : v.toLowerCase().indexOf(lower);
+        if (at >= 0) loose = v.slice(at, at + text.length);
+      }
+      return loose || text;
+    }
+
+    async function saveText(from, to) {
+      if (!from || from === to) return;
+      try {
+        const drawn = drawnText(), spelling = realSpelling(from);
+        const inCanvas = drawn.includes(from);
+        if (!inCanvas) from = spelling;
+        const onPage = inCanvas || (document.body.innerText || '').includes(from) || spelling !== from;
+        const d = await api('text', {from, to});
+        if (spelling !== from) await api('text', {from: spelling, to});  // same text on the page itself
+        if (!d.source_files && !onPage && !d.was_edit) {
+          await api('text', {from: d.from, to: d.from});
+          showToast('Could not find that exact text. Check spelling and capitals.', true);
+          return;
+        }
+        editor.classList.remove('open');
+        if (d.missing.length && !inCanvas) {
+          showToast('The 3D font has no glyph for: ' + d.missing.join(' '), true);
+          reloadSoon(2600);
+        } else {
+          showToast('Text saved! Reloading...');
+          reloadSoon(500);
+        }
+      } catch (err) { showToast(err.message, true); }
+    }
+
+    function pickText(e, target) {
+      const caret = document.caretRangeFromPoint && document.caretRangeFromPoint(e.clientX, e.clientY);
+      const node = caret && caret.startContainer;
+      const text = node && node.nodeType === 3 ? node.nodeValue.trim() : '';
+      if (!text || !target || target.closest('canvas')) { openTextEditor(); return; }
+      openModal('Edit text', 'Changes this text everywhere on the site.', text, val => saveText(text, val.trim()));
+    }
+
+    async function openTextEditor() {
+      openEditor('Edit text', 'Text drawn into canvas and WebGL is listed below. For other 3D text, ' +
+                 'type it exactly as shown on screen in "Text on the page".');
+      const from = textInput('', 'Text on the page'), to = textInput('', 'New text');
+      const add = mk('div', 'rep-add');
+      add.append(from, to, button('Replace', () => saveText(from.value.trim(), to.value.trim()), 'rep-btn-primary'));
+      const filter = textInput('', 'Filter list...');
+      editorTools.append(add, filter);
+      let rules = [];
+      try { rules = (await api('text')).rules; } catch (err) { showToast(err.message, true); }
+      const known = new Set(rules.flatMap(r => [r.from, r.to]));
+      const edited = new Map(rules.map(r => [r.to, r.from]));  // one row per visible text
+      const rows = [...edited].map(([current, original]) => ({current, original}))
+        .concat(drawnText().filter(t => !known.has(t)).map(t => ({current: t})));
+      const draw = () => {
+        const q = filter.value.toLowerCase();
+        editorList.replaceChildren(...rows.filter(r => r.current.toLowerCase().includes(q)).map(r => {
+          const row = mk('div', 'rep-item'), input = textInput(r.current);
+          row.append(input, button('Save', () => saveText(r.current, input.value.trim()), 'rep-btn-primary'));
+          row.append(r.original ? button('Reset', () => saveText(r.current, r.original)) : mk('span'));
+          row.append(mk('small', '', r.original ? 'Edited. Original: ' + (r.original) : 'Canvas / WebGL'));
+          return row;
+        }));
+        if (!editorList.children.length) editorList.append(mk('small', '', 'No canvas text found on this page yet.'));
+      };
+      filter.addEventListener('input', draw);
+      draw();
+    }
+
+    function resized(file, width, height, mime) {
+      return new Promise((resolve, reject) => {
+        const img = new Image(), src = URL.createObjectURL(file);
+        img.onerror = () => reject(new Error('That file is not a readable image.'));
+        img.onload = () => {
+          const c = document.createElement('canvas');
+          c.width = width; c.height = height;
+          const k = Math.max(width / img.naturalWidth, height / img.naturalHeight);
+          const w = img.naturalWidth * k, h = img.naturalHeight * k;
+          c.getContext('2d').drawImage(img, (width - w) / 2, (height - h) / 2, w, h);
+          URL.revokeObjectURL(src);
+          c.toBlob(b => b ? resolve(b) : reject(new Error('Could not encode the image.')), mime, 0.92);
+        };
+        img.src = src;
+      });
+    }
+
+    async function openImageEditor() {
+      openEditor('Replace images & textures', 'The new image is fitted to the original size, so 3D textures keep working.');
+      const grid = mk('div', 'rep-grid');
+      editorList.append(grid);
+      let data;
+      try { data = await api('images'); } catch (err) { showToast(err.message, true); return; }
+      if (data.compressed) editorDesc.textContent += ' ' + data.compressed +
+        ' compressed GPU textures (.ktx2/.basis) cannot be replaced here.';
+      for (const item of data.images) {
+        const card = mk('div', 'rep-card'), img = mk('img');
+        img.loading = 'lazy';
+        img.src = item.local;
+        const file = mk('input');
+        file.type = 'file';
+        file.accept = 'image/*';
+        file.addEventListener('change', async () => {
+          try {
+            if (!img.naturalWidth) throw new Error('The original image could not be read.');
+            const blob = await resized(file.files[0], img.naturalWidth, img.naturalHeight, item.mime);
+            const r = await fetch('/__replicator/image?url=' + encodeURIComponent(item.url), {method: 'POST', body: blob});
+            if (!r.ok) throw new Error((await r.json()).error);
+            editor.classList.remove('open');
+            showToast('Image replaced! Reloading...');
+            reloadSoon(500);
+          } catch (err) { showToast(err.message, true); }
+        });
+        card.append(img, mk('span', '', item.url.split('?')[0].split('/').pop()),
+                    button('Replace', () => file.click()));
+        if (item.edited) card.append(button('Restore', async () => {
+          await api('image_restore', {url: item.url});
+          location.reload();
+        }));
+        grid.append(card);
+      }
+      if (!data.images.length) editorList.append(mk('small', '', 'No PNG, JPEG or WebP files in this archive.'));
+    }
 
     // Block URL
     shadow.getElementById('rep_block_url_btn').addEventListener('click', () => {
