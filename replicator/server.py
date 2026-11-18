@@ -28,7 +28,7 @@ from .util import (origin_of, path_query, pick_port, preferred_port, replay_head
                    short)
 
 SW_PATH = "/__replicator_sw.js"
-MAX_EDIT_UPLOAD = 64 * 1024 * 1024
+MAX_EDIT_UPLOAD = 512 * 1024 * 1024
 
 SERVICE_WORKER_JS = r"""
 // Website Replicator service worker: re-route cross-origin requests to the local archive.
@@ -425,6 +425,8 @@ class ReplayServer:
                 result = self.archive.list_images()
                 for item in result["images"]:
                     item["local"] = self._local_url(item["url"])
+                if result["transcoder"]:
+                    result["transcoder"] = {k: self._local_url(v) for k, v in result["transcoder"].items()}
                 return reply(200, result)
             if method != "POST":
                 return reply(405, {"error": "POST required."})
@@ -432,8 +434,14 @@ class ReplayServer:
                 url = parse_qs(urlsplit(path).query).get("url", [""])[0]
                 if not raw:
                     return reply(400, {"error": "No image data."})
-                replace = self.archive.replace_image if route == "image" else self.archive.replace_sdf_texture
-                return reply(200, {"replaced": replace(url, raw)})
+                if route == "image":
+                    mime = (h.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                    allowed = mime.startswith(("image/", "video/", "audio/", "font/"))
+                    return reply(200, {"replaced": self.archive.replace_image(url, raw, mime if allowed else None)})
+                try:
+                    return reply(200, {"replaced": self.archive.replace_sdf_texture(url, raw)})
+                except ValueError:
+                    return reply(200, {"replaced": self.archive.replace_ktx2_image(url, raw)})
             return reply(200, {"restored": self.archive.restore_image(str(json.loads(raw.decode("utf-8"))["url"]))})
         except KeyError:
             return reply(404, {"error": "Not found in this archive."})

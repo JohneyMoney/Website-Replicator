@@ -847,37 +847,44 @@ class Archive:
     def list_images(self) -> dict:
         """Replaceable images/textures, one entry per distinct file."""
         conn, items, seen, compressed = self.connect(), [], set(), 0
+        transcoder: dict[str, str] = {}
         try:
             for r in conn.execute("SELECT url, mime, body FROM responses WHERE method='GET' AND status=200 "
                                   "AND body IS NOT NULL ORDER BY id"):
                 path = urlsplit(r["url"]).path.lower()
-                if path.endswith((".ktx2", ".basis", ".dds")):
-                    digest = hashlib.sha1(r["body"]).digest()
-                    if digest in seen:
-                        continue
-                    seen.add(digest)
-                    backup = _win_path(self._original_path(r["url"]))
-                    shape = _sdf_shape(backup.read_bytes()) if backup.exists() else None
-                    current = _sdf_shape(r["body"])
-                    if current:
-                        items.append({"url": r["url"], "kind": "sdf", "mime": "image/ktx2", "size": len(r["body"]),
-                                      "width": current["width"], "height": current["height"],
-                                      "bbox": (shape or current)["bbox"], "preview": current["preview"],
-                                      "edited": backup.exists()})
-                    else:
-                        compressed += 1
-                    continue
+                if path.endswith("basis_transcoder.js"):
+                    transcoder.setdefault("js", r["url"])
+                elif path.endswith("basis_transcoder.wasm"):
+                    transcoder.setdefault("wasm", r["url"])
                 mime = (r["mime"] or "").split(";")[0].strip().lower()
-                if mime not in ("image/png", "image/jpeg", "image/webp"):
+                kind = _asset_kind(path, mime)
+                if kind is None:
                     continue
                 digest = hashlib.sha1(r["body"]).digest()
-                if digest not in seen:
-                    seen.add(digest)
-                    items.append({"url": r["url"], "mime": mime, "size": len(r["body"]),
-                                  "edited": _win_path(self._original_path(r["url"])).exists()})
+                if digest in seen:
+                    continue
+                seen.add(digest)
+                backup = _win_path(self._original_path(r["url"]))
+                item = {"url": r["url"], "kind": kind, "mime": mime, "size": len(r["body"]),
+                        "edited": backup.exists()}
+                if kind == "texture":
+                    body = bytes(r["body"])
+                    original = backup.read_bytes() if backup.exists() else body
+                    shape, current = _sdf_shape(original), _sdf_shape(body)
+                    header = _ktx2_header(original)
+                    if shape and current:
+                        item.update(kind="sdf", width=shape["width"], height=shape["height"],
+                                    bbox=shape["bbox"], preview=current["preview"])
+                    elif header and header["vk"] == 0:
+                        item.update(width=header["width"], height=header["height"], levels=header["levels"])
+                    else:
+                        compressed += 1
+                        continue
+                items.append(item)
         finally:
             conn.close()
-        return {"images": items, "compressed": compressed}
+        return {"images": items, "compressed": compressed,
+                "transcoder": transcoder if len(transcoder) == 2 else None}
 
     def _same_file_urls(self, conn, url: str) -> list[str]:
         row = conn.execute("SELECT body FROM responses WHERE method='GET' AND status=200 AND url=?",
@@ -887,21 +894,70 @@ class Archive:
         return [r["url"] for r in conn.execute(
             "SELECT url FROM responses WHERE method='GET' AND status=200 AND body=?", (row["body"],))]
 
-    def replace_image(self, url: str, data: bytes) -> int:
-        """Replace an image everywhere it occurs, keeping the original for restore_image()."""
+    def _set_content_type(self, conn, url: str, mime: str, headers: list | None = None) -> None:
+        row = conn.execute("SELECT resp_headers FROM responses WHERE method='GET' AND status=200 AND url=?",
+                           (url,)).fetchone()
+        if headers is None:
+            headers = [p for p in json.loads(row["resp_headers"]) if p[0].lower() != "content-type"]
+            headers.append(["content-type", mime])
+        with self._lock:
+            conn.execute("UPDATE responses SET mime=?, resp_headers=? WHERE method='GET' AND status=200 AND url=?",
+                         (mime, json.dumps(headers), url))
+            conn.commit()
+
+    def replace_image(self, url: str, data: bytes, mime: str | None = None) -> int:
+        """Replace a file everywhere it occurs, keeping the original for restore_image().
+        `mime` may change the format within the same family (PNG -> GIF, MP3 -> OGG...)."""
         conn = self.connect()
         try:
             urls = self._same_file_urls(conn, url)
             for u in urls:
                 backup = self._original_path(u)
+                row = conn.execute("SELECT body, mime, resp_headers FROM responses "
+                                   "WHERE method='GET' AND status=200 AND url=?", (u,)).fetchone()
                 if not _win_path(backup).exists():
-                    row = conn.execute("SELECT body FROM responses WHERE method='GET' AND status=200 AND url=?",
-                                       (u,)).fetchone()
                     _write(backup, row["body"])
+                    _write(backup.with_suffix(".json"), json.dumps(
+                        {"mime": row["mime"], "headers": json.loads(row["resp_headers"])}).encode("utf-8"))
                 self.save_entry_bytes(u, data, conn)
+                if mime and mime != (row["mime"] or "").split(";")[0].strip().lower():
+                    self._set_content_type(conn, u, mime)
             return len(urls)
         finally:
             conn.close()
+
+    def replace_ktx2_image(self, url: str, pixels: bytes) -> int:
+        """Replace a GPU-compressed KTX2 texture with RGBA8 pixels (all mip levels, largest first)."""
+        conn = self.connect()
+        try:
+            row = conn.execute("SELECT body FROM responses WHERE method='GET' AND status=200 AND url=?",
+                               (url,)).fetchone()
+        finally:
+            conn.close()
+        if row is None or row["body"] is None:
+            raise KeyError(url)
+        backup = _win_path(self._original_path(url))
+        header = _ktx2_header(backup.read_bytes() if backup.exists() else bytes(row["body"]))
+        if not header:
+            raise ValueError("This texture cannot be replaced.")
+        w, h, count = header["width"], header["height"], header["levels"]
+        sizes = [max(1, w >> i) * max(1, h >> i) * 4 for i in range(count)]
+        if len(pixels) != sum(sizes):
+            raise ValueError("The texture data has the wrong size.")
+        dfd = bytearray(_RGBA8_DFD)
+        dfd[14] = 2 if header["transfer"] == 2 else 1
+        start = 80 + 24 * count + len(dfd)
+        levels, index, cursor, read = [], [b""] * count, start, 0
+        offsets = [sum(sizes[:i]) for i in range(count)]
+        for i in range(count - 1, -1, -1):  # KTX2 stores the smallest level first
+            read = offsets[i]
+            levels.append(pixels[read:read + sizes[i]])
+            index[i] = struct.pack("<3Q", cursor, sizes[i], sizes[i])
+            cursor += sizes[i]
+        out = b"\xabKTX 20\xbb\r\n\x1a\n" + struct.pack(
+            "<9I", 43 if header["transfer"] == 2 else 37, 1, w, h, 0, 0, 1, count, 0)
+        out += struct.pack("<4I", 80 + 24 * count, len(dfd), 0, 0) + struct.pack("<2Q", 0, 0)
+        return self.replace_image(url, out + b"".join(index) + bytes(dfd) + b"".join(levels))
 
     def replace_sdf_texture(self, url: str, rgba: bytes) -> int:
         """Replace an RGBA8 KTX2 distance-field texture (logos, icons) with new pixels."""
@@ -930,6 +986,11 @@ class Archive:
                 backup = _win_path(self._original_path(u))
                 if backup.exists():
                     self.save_entry_bytes(u, backup.read_bytes(), conn)
+                    meta = backup.with_suffix(".json")
+                    if meta.exists():
+                        saved = json.loads(meta.read_text("utf-8"))
+                        self._set_content_type(conn, u, saved["mime"], saved["headers"])
+                        meta.unlink()
                     backup.unlink()
                     restored += 1
             return restored
@@ -1049,6 +1110,45 @@ function ping() {   // a <script> tag works from file:// where fetch() is blocke
 ping(); setInterval(ping, 1500);
 </script></body></html>
 """
+
+_RGBA8_DFD = bytes.fromhex(
+    "5c000000" "00000000" "02005800" "01010100" "00000000" "04000000" "00000000"
+    "00000700" "00000000" "00000000" "ff000000"
+    "08000701" "00000000" "00000000" "ff000000"
+    "10000702" "00000000" "00000000" "ff000000"
+    "1800070f" "00000000" "00000000" "ff000000")
+_FONT_EXTS = (".woff2", ".woff", ".ttf", ".otf")
+_IMAGE_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml",
+                "image/avif", "image/bmp", "image/x-icon", "image/vnd.microsoft.icon")
+
+
+def _asset_kind(path: str, mime: str) -> str | None:
+    """Which replaceable family a captured file belongs to (None = not offered)."""
+    if path.endswith(".ktx2"):
+        return "texture"
+    if mime in _IMAGE_TYPES:
+        return "image"
+    if mime.startswith("video/") or path.endswith((".mp4", ".webm")):
+        return "video"
+    if mime.startswith("audio/") or path.endswith((".mp3", ".ogg", ".wav", ".m4a")):
+        return "audio"
+    if mime.startswith("font/") or path.endswith(_FONT_EXTS):
+        return "font"
+    if path.endswith((".glb", ".gltf")):
+        return "model"
+    return None
+
+
+def _ktx2_header(body: bytes) -> dict | None:
+    if len(body) < 104 or body[:12] != b"\xabKTX 20\xbb\r\n\x1a\n":
+        return None
+    vk, _, width, height, depth, layers, faces, levels, scheme = struct.unpack_from("<9I", body, 12)
+    if depth or layers or faces != 1 or not width or not height:
+        return None
+    dfd = struct.unpack_from("<I", body, 48)[0]
+    return {"vk": vk, "width": width, "height": height, "levels": max(1, levels),
+            "scheme": scheme, "transfer": body[dfd + 14] if dfd + 14 < len(body) else 1}
+
 
 def _ktx2_info(body: bytes) -> dict | None:
     """Header of a single-image RGBA8 KTX2 file, or None for anything else."""

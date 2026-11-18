@@ -208,6 +208,11 @@ INPAGE_TOOLS_JS = r"""
       .rep-card { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: #94a3b8; min-width: 0; }
       .rep-card img { width: 100%; height: 100px; object-fit: contain; background: #1e293b; border-radius: 6px; }
       .rep-card span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .rep-card canvas, .rep-card video { width: 100%; height: 100px; object-fit: contain; background: #1e293b; border-radius: 6px; }
+      .rep-card audio { width: 100%; height: 34px; }
+      .rep-file { height: 100px; display: grid; place-items: center; background: #1e293b; border-radius: 6px; font-size: 13px; font-weight: 700; color: #cbd5e1; }
+      .rep-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+      .rep-tabs .on { background: #2563eb; border-color: #3b82f6; }
     `;
     shadow.appendChild(style);
 
@@ -226,7 +231,7 @@ INPAGE_TOOLS_JS = r"""
         <span id="rep_close" style="cursor:pointer;color:#94a3b8">&times;</span>
       </div>
       <button class="rep-btn rep-btn-primary" id="rep_text_btn">✏️ Edit Text, also 3D/WebGL (Alt+T)</button>
-      <button class="rep-btn" id="rep_images_btn">🖼 Replace Images &amp; Textures</button>
+      <button class="rep-btn" id="rep_images_btn">🖼 Replace Images, Video, Audio &amp; More</button>
       <button class="rep-btn" id="rep_zap_btn">🎯 Zap Element (Alt+Z)</button>
       <button class="rep-btn" id="rep_unlock_btn">🔓 Unlock Page Scroll</button>
       <button class="rep-btn" id="rep_edit_css_btn">📋 Edit CSS Overrides</button>
@@ -684,43 +689,171 @@ INPAGE_TOOLS_JS = r"""
       return card;
     }
 
+    // ------------------------------------------------- File replacement
+    const FILE_KINDS = {image: 'Images', texture: '3D textures', video: 'Video', audio: 'Audio',
+                        font: 'Fonts', model: '3D models'};
+    const ACCEPT = {image: 'image/*', texture: 'image/*', video: 'video/*', audio: 'audio/*',
+                    font: '.woff2,.woff,.ttf,.otf', model: '.glb,.gltf'};
+    const FONT_TYPES = {woff2: 'font/woff2', woff: 'font/woff', ttf: 'font/ttf', otf: 'font/otf'};
+    const fileName = item => decodeURIComponent(item.url.split('?')[0].split('/').pop() || 'file');
+    const kindOf = item => item.kind === 'sdf' ? 'texture' : item.kind;
+
+    async function upload(path, body, type) {
+      const r = await fetch(path, {method: 'POST', body, headers: type ? {'Content-Type': type} : {}});
+      if (!r.ok) throw new Error((await r.json()).error || 'Upload failed');
+      editor.classList.remove('open');
+      showToast('Replaced! Reloading...');
+      reloadSoon(500);
+    }
+    const fileUrl = (route, item) => '/__replicator/' + route + '?url=' + encodeURIComponent(item.url);
+
+    // Fill a canvas-sized image and return RGBA for every mip level, largest first.
+    function texturePixels(source, item) {
+      const parts = [];
+      for (let level = 0; level < item.levels; level++) {
+        const w = Math.max(1, item.width >> level), h = Math.max(1, item.height >> level);
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const g = c.getContext('2d', {willReadFrequently: true});
+        const k = Math.max(w / source.naturalWidth, h / source.naturalHeight);
+        const dw = source.naturalWidth * k, dh = source.naturalHeight * k;
+        g.drawImage(source, (w - dw) / 2, (h - dh) / 2, dw, dh);
+        parts.push(g.getImageData(0, 0, w, h).data);
+      }
+      const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+      let at = 0;
+      for (const p of parts) { out.set(p, at); at += p.length; }
+      return out;
+    }
+    const loadImage = file => new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('That file is not a readable image.'));
+      img.src = URL.createObjectURL(file);
+    });
+
+    async function replaceFile(item, file, preview) {
+      const ext = file.name.split('.').pop().toLowerCase();
+      if (item.kind === 'texture') {
+        return upload(fileUrl('texture', item), texturePixels(await loadImage(file), item));
+      }
+      if (item.kind === 'image' && /^image\/(png|jpeg|webp)$/.test(item.mime) &&
+          !/^image\/(gif|svg\+xml)$/.test(file.type) && preview.naturalWidth) {
+        return upload(fileUrl('image', item),
+                      await resized(file, preview.naturalWidth, preview.naturalHeight, item.mime), item.mime);
+      }
+      if (item.kind === 'model' && ext !== item.url.split('?')[0].split('.').pop().toLowerCase()) {
+        throw new Error('A 3D model must be replaced by the same file type.');
+      }
+      const type = item.kind === 'font' ? FONT_TYPES[ext] : item.kind === 'model' ? '' : file.type;
+      return upload(fileUrl('image', item), file, type);
+    }
+
+    let basisReady = null;
+    function basisModule(t) {
+      basisReady = basisReady || (async () => {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement('script');
+          s.src = t.js; s.onload = resolve; s.onerror = reject;
+          document.head.append(s);
+        });
+        const wasmBinary = await (await fetch(t.wasm)).arrayBuffer();
+        const M = await window.BASIS({wasmBinary});
+        M.initializeBasis();
+        return M;
+      })();
+      return basisReady;
+    }
+    function paint(canvas, w, h, rgba) {
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(rgba), w, h), 0, 0);
+    }
+    async function drawTexture(item, canvas, transcoder) {
+      const bytes = new Uint8Array(await (await fetch(item.local)).arrayBuffer());
+      const view = new DataView(bytes.buffer), vk = view.getUint32(12, true);
+      if (vk === 37 || vk === 43) {  // our own uncompressed replacement
+        const count = Math.max(1, view.getUint32(40, true));
+        let level = 0;
+        while (level < count - 1 && (view.getUint32(20, true) >> level) > 256) level++;
+        const at = 80 + level * 24, start = Number(view.getBigUint64(at, true)), size = Number(view.getBigUint64(at + 8, true));
+        paint(canvas, Math.max(1, view.getUint32(20, true) >> level), Math.max(1, view.getUint32(24, true) >> level),
+              bytes.slice(start, start + size));
+        return;
+      }
+      if (!transcoder) return;
+      const M = await basisModule(transcoder), f = new M.KTX2File(bytes);
+      try {
+        if (!f.isValid() || !f.startTranscoding()) return;
+        let level = 0;
+        while (level < f.getLevels() - 1 && f.getImageLevelInfo(level, 0, 0).origWidth > 256) level++;
+        const info = f.getImageLevelInfo(level, 0, 0), RGBA32 = 13;
+        const out = new Uint8Array(f.getImageTranscodedSizeInBytes(level, 0, 0, RGBA32));
+        if (f.transcodeImage(out, level, 0, 0, RGBA32, 0, -1, -1)) paint(canvas, info.origWidth, info.origHeight, out);
+      } finally { f.close(); f.delete(); }
+    }
+
+    function fileCard(item, transcoder, previews) {
+      if (item.kind === 'sdf') return sdfCard(item);
+      const card = mk('div', 'rep-card');
+      let preview;
+      if (item.kind === 'image') {
+        preview = mk('img'); preview.loading = 'lazy'; preview.src = item.local;
+      } else if (item.kind === 'video') {
+        preview = mk('video'); preview.controls = true; preview.muted = true;
+        preview.preload = 'metadata'; preview.src = item.local;
+      } else if (item.kind === 'audio') {
+        preview = mk('audio'); preview.controls = true; preview.preload = 'none'; preview.src = item.local;
+      } else if (item.kind === 'texture') {
+        preview = mk('canvas'); previews.push(() => drawTexture(item, preview, transcoder));
+      } else {
+        preview = mk('div', 'rep-file', fileName(item).split('.').pop().toUpperCase());
+      }
+      const file = mk('input');
+      file.type = 'file';
+      file.accept = ACCEPT[item.kind];
+      file.addEventListener('change', () => {
+        replaceFile(item, file.files[0], preview).catch(err => showToast(err.message, true));
+      });
+      card.append(preview, mk('span', '', fileName(item)), button('Replace', () => file.click()));
+      if (item.edited) card.append(button('Restore', async () => {
+        await api('image_restore', {url: item.url});
+        location.reload();
+      }));
+      return card;
+    }
+
     async function openImageEditor() {
-      openEditor('Replace images & textures', 'The new image is fitted to the original size, so 3D textures keep working.');
-      const grid = mk('div', 'rep-grid');
-      editorList.append(grid);
+      openEditor('Replace files', 'Pick a file and swap it for your own. Images used in 3D are fitted to the original size.');
       let data;
       try { data = await api('images'); } catch (err) { showToast(err.message, true); return; }
-      if (data.compressed) editorDesc.textContent += ' ' + data.compressed +
-        ' compressed GPU textures (.ktx2/.basis) cannot be replaced here.';
-      data.images.sort((a, b) => (b.kind === 'sdf') - (a.kind === 'sdf'));
-      for (const item of data.images) {
-        if (item.kind === 'sdf') { grid.append(sdfCard(item)); continue; }
-        const card = mk('div', 'rep-card'), img = mk('img');
-        img.loading = 'lazy';
-        img.src = item.local;
-        const file = mk('input');
-        file.type = 'file';
-        file.accept = 'image/*';
-        file.addEventListener('change', async () => {
-          try {
-            if (!img.naturalWidth) throw new Error('The original image could not be read.');
-            const blob = await resized(file.files[0], img.naturalWidth, img.naturalHeight, item.mime);
-            const r = await fetch('/__replicator/image?url=' + encodeURIComponent(item.url), {method: 'POST', body: blob});
-            if (!r.ok) throw new Error((await r.json()).error);
-            editor.classList.remove('open');
-            showToast('Image replaced! Reloading...');
-            reloadSoon(500);
-          } catch (err) { showToast(err.message, true); }
-        });
-        card.append(img, mk('span', '', item.url.split('?')[0].split('/').pop()),
-                    button('Replace', () => file.click()));
-        if (item.edited) card.append(button('Restore', async () => {
-          await api('image_restore', {url: item.url});
-          location.reload();
+      if (data.compressed) editorDesc.textContent += ' ' + data.compressed + ' technical textures are hidden.';
+      const items = data.images.sort((a, b) => (b.kind === 'sdf') - (a.kind === 'sdf'));
+      const tabs = mk('div', 'rep-tabs'), search = textInput('', 'Search file names...');
+      editorTools.append(tabs, search);
+      const grid = mk('div', 'rep-grid');
+      editorList.append(grid);
+      const kinds = Object.keys(FILE_KINDS).filter(k => items.some(i => kindOf(i) === k));
+      let active = kinds[0];
+      let drawing = 0;
+      const draw = () => {
+        const run = ++drawing, q = search.value.toLowerCase(), previews = [];
+        tabs.replaceChildren(...kinds.map(k => {
+          const b = button(`${FILE_KINDS[k]} (${items.filter(i => kindOf(i) === k).length})`, () => { active = k; draw(); });
+          b.classList.toggle('on', k === active);
+          return b;
         }));
-        grid.append(card);
-      }
-      if (!data.images.length) editorList.append(mk('small', '', 'No PNG, JPEG or WebP files in this archive.'));
+        grid.replaceChildren(...items.filter(i => kindOf(i) === active && fileName(i).toLowerCase().includes(q))
+          .map(i => fileCard(i, data.transcoder, previews)));
+        (async () => {
+          for (const show of previews) {
+            if (run !== drawing || !editor.classList.contains('open')) return;
+            await show().catch(() => {});
+          }
+        })();
+      };
+      search.addEventListener('input', draw);
+      draw();
+      if (!items.length) editorList.append(mk('small', '', 'No replaceable files in this archive.'));
     }
 
     // Block URL
