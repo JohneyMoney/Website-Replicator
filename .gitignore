@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Captured websites and exports
+archives/
+*.db
+*.har
+
+# Nested local copy of this project
+/WebsiteReplicator/
