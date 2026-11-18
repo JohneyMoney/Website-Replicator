@@ -31,7 +31,7 @@ python -m replicator html <archive> out.html
 In "Play Offline", open the **⚡ Replicator** button at the bottom right.
 
 - **Edit Text** (Alt+T): click text on the page, or edit the list of text drawn into canvas and WebGL. Text from MSDF or bitmap 3D fonts is changed by typing it exactly as shown; the app warns if the font has no glyph for a new character.
-- **Replace Images & Textures**: swap PNG, JPEG or WebP files. The original is kept so you can restore it. Compressed GPU textures (`.ktx2`, `.basis`) and text modelled into 3D geometry cannot be changed this way.
+- **Replace Images & Textures**: swap PNG, JPEG or WebP files, or use **Replace with text** on logos stored as distance-field `.ktx2` textures (needs Python 3.14). The original is kept so you can restore it. Other compressed GPU textures and text modelled into 3D geometry cannot be changed this way.
 
 Edits are saved in the archive and included in **Export single HTML...**.
 

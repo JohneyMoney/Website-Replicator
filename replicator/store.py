@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sqlite3
+import struct
 import threading
 import time
 from pathlib import Path
@@ -851,7 +852,20 @@ class Archive:
                                   "AND body IS NOT NULL ORDER BY id"):
                 path = urlsplit(r["url"]).path.lower()
                 if path.endswith((".ktx2", ".basis", ".dds")):
-                    compressed += 1
+                    digest = hashlib.sha1(r["body"]).digest()
+                    if digest in seen:
+                        continue
+                    seen.add(digest)
+                    backup = _win_path(self._original_path(r["url"]))
+                    shape = _sdf_shape(backup.read_bytes()) if backup.exists() else None
+                    current = _sdf_shape(r["body"])
+                    if current:
+                        items.append({"url": r["url"], "kind": "sdf", "mime": "image/ktx2", "size": len(r["body"]),
+                                      "width": current["width"], "height": current["height"],
+                                      "bbox": (shape or current)["bbox"], "preview": current["preview"],
+                                      "edited": backup.exists()})
+                    else:
+                        compressed += 1
                     continue
                 mime = (r["mime"] or "").split(";")[0].strip().lower()
                 if mime not in ("image/png", "image/jpeg", "image/webp"):
@@ -888,6 +902,26 @@ class Archive:
             return len(urls)
         finally:
             conn.close()
+
+    def replace_sdf_texture(self, url: str, rgba: bytes) -> int:
+        """Replace an RGBA8 KTX2 distance-field texture (logos, icons) with new pixels."""
+        conn = self.connect()
+        try:
+            row = conn.execute("SELECT body FROM responses WHERE method='GET' AND status=200 AND url=?",
+                               (url,)).fetchone()
+        finally:
+            conn.close()
+        if row is None or row["body"] is None:
+            raise KeyError(url)
+        body = bytes(row["body"])
+        info = _ktx2_info(body)
+        if not info or len(rgba) != info["width"] * info["height"] * 4:
+            raise ValueError("This texture cannot be replaced with these pixels.")
+        out = bytearray(body[:info["offset"]])
+        struct.pack_into("<I", out, 44, 0)                                     # no supercompression
+        struct.pack_into("<3Q", out, 80, info["offset"], len(rgba), len(rgba))  # level 0
+        out[info["dfd"] + 20] = 4                                              # bytes per texel
+        return self.replace_image(url, bytes(out) + rgba)
 
     def restore_image(self, url: str) -> int:
         conn, restored = self.connect(), 0
@@ -1015,6 +1049,74 @@ function ping() {   // a <script> tag works from file:// where fetch() is blocke
 ping(); setInterval(ping, 1500);
 </script></body></html>
 """
+
+def _ktx2_info(body: bytes) -> dict | None:
+    """Header of a single-image RGBA8 KTX2 file, or None for anything else."""
+    if len(body) < 104 or body[:12] != b"\xabKTX 20\xbb\r\n\x1a\n":
+        return None
+    vk, _, width, height, depth, layers, faces, levels, scheme = struct.unpack_from("<9I", body, 12)
+    if vk not in (37, 43) or depth or layers or faces != 1 or levels > 1 or scheme not in (0, 2):
+        return None
+    offset, length, _ = struct.unpack_from("<3Q", body, 80)
+    dfd = struct.unpack_from("<I", body, 48)[0]
+    if not width or not height or offset + length > len(body):
+        return None
+    return {"width": width, "height": height, "scheme": scheme, "offset": offset, "length": length, "dfd": dfd}
+
+
+def _ktx2_pixels(body: bytes, info: dict) -> bytes | None:
+    data = body[info["offset"]:info["offset"] + info["length"]]
+    if info["scheme"] == 2:
+        try:
+            from compression import zstd  # Python 3.14+
+        except ImportError:
+            return None
+        try:
+            data = zstd.decompress(data)
+        except zstd.ZstdError:
+            return None
+    return data if len(data) == info["width"] * info["height"] * 4 else None
+
+
+def _gray_png(width: int, height: int, rows: bytes) -> str:
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    raw = b"".join(b"\0" + rows[y * width:(y + 1) * width] for y in range(height))
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+    return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
+
+def _sdf_shape(body: bytes) -> dict | None:
+    """Recognise a small distance-field logo/icon: preview plus the box its shape fills."""
+    info = _ktx2_info(body)
+    if not info or max(info["width"], info["height"]) > 256:
+        return None
+    pixels = _ktx2_pixels(body, info)
+    if pixels is None:
+        return None
+    w, h = info["width"], info["height"]
+    median = bytearray(w * h)
+    for i in range(w * h):
+        r, g, b = pixels[i * 4], pixels[i * 4 + 1], pixels[i * 4 + 2]
+        median[i] = max(min(r, g), min(max(r, g), b))
+    if max(median) < 200 or sum(1 for m in median if m <= 8) < w * h * 0.3:
+        return None  # noise, colour data or a texture with no empty background
+    upright, xs, ys = bytearray(w * h), [], []
+    for row in range(h):  # GPU data textures are stored bottom row first
+        y = h - 1 - row
+        for x in range(w):
+            if median[row * w + x] > 127:
+                upright[y * w + x] = 255
+                xs.append(x)
+                ys.append(y)
+    if not xs:
+        return None
+    return {"width": w, "height": h, "bbox": [min(xs), min(ys), max(xs) + 1, max(ys) + 1],
+            "preview": _gray_png(w, h, bytes(upright))}
+
 
 _INLINE_SCRIPT = re.compile(r"(<script\b(?![^>]*\bsrc\s*=)[^>]*>)(.*?)(</script\s*>)", re.I | re.S)
 _BAD_CHARS = re.compile(r'[<>:"|?*\\\x00-\x1f]')

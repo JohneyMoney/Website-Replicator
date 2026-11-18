@@ -467,6 +467,7 @@ INPAGE_TOOLS_JS = r"""
     }
     const reloadSoon = ms => setTimeout(() => location.reload(), ms);
     const drawnText = () => window.__replicator_text ? window.__replicator_text.drawn() : [];
+    const sceneText = () => window.__replicator_text ? window.__replicator_text.scene() : [];
 
     const editor = mk('div', 'rep-modal');
     const editorBox = mk('div', 'rep-modal-box rep-wide');
@@ -514,7 +515,8 @@ INPAGE_TOOLS_JS = r"""
         const drawn = drawnText(), spelling = realSpelling(from);
         const inCanvas = drawn.includes(from);
         if (!inCanvas) from = spelling;
-        const onPage = inCanvas || (document.body.innerText || '').includes(from) || spelling !== from;
+        const onPage = inCanvas || sceneText().includes(from) ||
+                       (document.body.innerText || '').includes(from) || spelling !== from;
         const d = await api('text', {from, to});
         if (spelling !== from) await api('text', {from: spelling, to});  // same text on the page itself
         if (!d.source_files && !onPage && !d.was_edit) {
@@ -554,7 +556,7 @@ INPAGE_TOOLS_JS = r"""
       const known = new Set(rules.flatMap(r => [r.from, r.to]));
       const edited = new Map(rules.map(r => [r.to, r.from]));  // one row per visible text
       const rows = [...edited].map(([current, original]) => ({current, original}))
-        .concat(drawnText().filter(t => !known.has(t)).map(t => ({current: t})));
+        .concat([...new Set([...sceneText(), ...drawnText()])].filter(t => !known.has(t)).map(t => ({current: t})));
       const draw = () => {
         const q = filter.value.toLowerCase();
         editorList.replaceChildren(...rows.filter(r => r.current.toLowerCase().includes(q)).map(r => {
@@ -587,6 +589,101 @@ INPAGE_TOOLS_JS = r"""
       });
     }
 
+    // Logos stored as distance-field textures are redrawn from typed text.
+    function distance1d(f, n, d, v, z) {
+      let k = 0;
+      v[0] = 0; z[0] = -1e20; z[1] = 1e20;
+      for (let q = 1; q < n; q++) {
+        let s;
+        do {
+          const r = v[k];
+          s = (f[q] + q * q - f[r] - r * r) / (2 * q - 2 * r);
+        } while (s <= z[k] && --k > -1);
+        k++;
+        v[k] = q; z[k] = s; z[k + 1] = 1e20;
+      }
+      k = 0;
+      for (let q = 0; q < n; q++) {
+        while (z[k + 1] < q) k++;
+        const r = v[k];
+        d[q] = (q - r) * (q - r) + f[r];
+      }
+    }
+    function distanceField(grid, w, h) {
+      const n = Math.max(w, h), f = new Float64Array(n), d = new Float64Array(n);
+      const v = new Uint32Array(n), z = new Float64Array(n + 1);
+      for (let x = 0; x < w; x++) {
+        for (let y = 0; y < h; y++) f[y] = grid[y * w + x];
+        distance1d(f, h, d, v, z);
+        for (let y = 0; y < h; y++) grid[y * w + x] = d[y];
+      }
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) f[x] = grid[y * w + x];
+        distance1d(f, w, d, v, z);
+        for (let x = 0; x < w; x++) grid[y * w + x] = d[x];
+      }
+      return grid;
+    }
+    function textTexture(text, item) {
+      const S = 6, W = item.width * S, H = item.height * S, [x0, y0, x1, y1] = item.bbox;
+      const c = document.createElement('canvas');
+      c.width = W; c.height = H;
+      const g = c.getContext('2d', {willReadFrequently: true}), native = window.__replicator_text.nativeCanvas;
+      g.font = '900 200px "Arial Black", Impact, Arial, sans-serif';
+      g.textBaseline = 'alphabetic';
+      const m = native.measureText.call(g, text);
+      const left = m.actualBoundingBoxLeft, right = m.actualBoundingBoxRight;
+      const up = m.actualBoundingBoxAscent, down = m.actualBoundingBoxDescent;
+      const tw = left + right, th = up + down;
+      if (!(tw > 0 && th > 0)) throw new Error('Type some visible text first.');
+      const k = Math.min((x1 - x0) * S / tw, (y1 - y0) * S / th);
+      g.setTransform(k, 0, 0, k, (x0 + x1) * S / 2 - k * (right - left) / 2, (y0 + y1) * S / 2 + k * (up - down) / 2);
+      native.fillText.call(g, text, 0, 0);
+      const alpha = g.getImageData(0, 0, W, H).data;
+      const outside = new Float64Array(W * H), inside = new Float64Array(W * H);
+      for (let i = 0; i < W * H; i++) {
+        const on = alpha[i * 4 + 3] > 127;
+        outside[i] = on ? 0 : 1e20;
+        inside[i] = on ? 1e20 : 0;
+      }
+      distanceField(outside, W, H);
+      distanceField(inside, W, H);
+      const out = new Uint8Array(item.width * item.height * 4);
+      for (let y = 0; y < item.height; y++) {
+        const row = item.height - 1 - y;  // data textures are stored bottom row first
+        for (let x = 0; x < item.width; x++) {
+          const i = Math.floor((y + 0.5) * S) * W + Math.floor((x + 0.5) * S);
+          const dist = (Math.sqrt(inside[i]) - Math.sqrt(outside[i])) / S;
+          const value = Math.round(Math.max(0, Math.min(1, 0.5 + dist / 4)) * 255), p = (row * item.width + x) * 4;
+          out[p] = out[p + 1] = out[p + 2] = value;
+        }
+      }
+      return out;
+    }
+    async function replaceWithText(item, text) {
+      try {
+        const r = await fetch('/__replicator/texture?url=' + encodeURIComponent(item.url),
+                              {method: 'POST', body: textTexture(text, item)});
+        if (!r.ok) throw new Error((await r.json()).error);
+        showToast('Logo replaced! Reloading...');
+        reloadSoon(500);
+      } catch (err) { showToast(err.message, true); }
+    }
+    function sdfCard(item) {
+      const card = mk('div', 'rep-card'), img = mk('img');
+      img.src = item.preview;
+      card.append(img, mk('span', '', item.url.split('?')[0].split('/').pop()), button('Replace with text', () => {
+        editor.classList.remove('open');
+        openModal('Replace logo with text', 'The new text is drawn in a heavy font and fitted to the original logo.',
+                  '', val => { if (val.trim()) replaceWithText(item, val.trim()); });
+      }));
+      if (item.edited) card.append(button('Restore', async () => {
+        await api('image_restore', {url: item.url});
+        location.reload();
+      }));
+      return card;
+    }
+
     async function openImageEditor() {
       openEditor('Replace images & textures', 'The new image is fitted to the original size, so 3D textures keep working.');
       const grid = mk('div', 'rep-grid');
@@ -595,7 +692,9 @@ INPAGE_TOOLS_JS = r"""
       try { data = await api('images'); } catch (err) { showToast(err.message, true); return; }
       if (data.compressed) editorDesc.textContent += ' ' + data.compressed +
         ' compressed GPU textures (.ktx2/.basis) cannot be replaced here.';
+      data.images.sort((a, b) => (b.kind === 'sdf') - (a.kind === 'sdf'));
       for (const item of data.images) {
+        if (item.kind === 'sdf') { grid.append(sdfCard(item)); continue; }
         const card = mk('div', 'rep-card'), img = mk('img');
         img.loading = 'lazy';
         img.src = item.local;

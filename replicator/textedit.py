@@ -37,6 +37,30 @@ TEXT_RUNTIME_JS = r"""
     const s = String(value).trim();
     if (s.length >= 2 && s.length < 400 && drawn.size < 800 && /\p{L}/u.test(s)) drawn.set(s, 1);
   }
+  // MSDF text is often laid out in a worker: {text} or {options: {text}}.
+  const scene = new Map();
+  if (window.Worker) {
+    const nativePost = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (msg, ...rest) {
+      try {
+        const holder = msg && typeof msg.text === 'string' ? msg
+          : msg && msg.options && typeof msg.options.text === 'string' ? msg.options : null;
+        if (holder) {
+          for (const line of holder.text.split('\n')) {
+            const s = line.trim();
+            if (s.length >= 2 && s.length < 400 && scene.size < 800 && /\p{L}/u.test(s)) scene.set(s, 1);
+          }
+          if (rules.length) {
+            const text = apply(holder.text);
+            msg = holder === msg ? {...msg, text} : {...msg, options: {...holder, text}};
+          }
+        }
+      } catch (_) {}
+      return nativePost.call(this, msg, ...rest);
+    };
+  }
+  const nativeCanvas = {fillText: CanvasRenderingContext2D.prototype.fillText,
+                        measureText: CanvasRenderingContext2D.prototype.measureText};
   for (const C of [window.CanvasRenderingContext2D, window.OffscreenCanvasRenderingContext2D]) {
     if (!C) continue;
     for (const name of ['fillText', 'strokeText', 'measureText']) {
@@ -72,7 +96,8 @@ TEXT_RUNTIME_JS = r"""
     document.addEventListener('DOMContentLoaded', () => fixTree(document));
     if (document.readyState !== 'loading') fixTree(document);
   }
-  window.__replicator_text = {apply, watch, drawn: () => [...drawn.keys()]};
+  window.__replicator_text = {apply, watch, nativeCanvas,
+                              drawn: () => [...drawn.keys()], scene: () => [...scene.keys()]};
   watch();
 })();
 """

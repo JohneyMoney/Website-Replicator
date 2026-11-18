@@ -294,7 +294,8 @@ class ReplayServer:
             return self._send(h, 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")],
                               json.dumps({"ok": True, "removed": removed}).encode())
         if path.split("?", 1)[0] in ("/__replicator/text", "/__replicator/images",
-                                     "/__replicator/image", "/__replicator/image_restore"):
+                                     "/__replicator/image", "/__replicator/image_restore",
+                                     "/__replicator/texture"):
             return self._edit_api(h, path, method)
         if path.startswith("/__replicator/overrides"):
             if method == "POST":
@@ -427,11 +428,12 @@ class ReplayServer:
                 return reply(200, result)
             if method != "POST":
                 return reply(405, {"error": "POST required."})
-            if route == "image":
+            if route in ("image", "texture"):
                 url = parse_qs(urlsplit(path).query).get("url", [""])[0]
                 if not raw:
                     return reply(400, {"error": "No image data."})
-                return reply(200, {"replaced": self.archive.replace_image(url, raw)})
+                replace = self.archive.replace_image if route == "image" else self.archive.replace_sdf_texture
+                return reply(200, {"replaced": replace(url, raw)})
             return reply(200, {"restored": self.archive.restore_image(str(json.loads(raw.decode("utf-8"))["url"]))})
         except KeyError:
             return reply(404, {"error": "Not found in this archive."})
