@@ -132,7 +132,9 @@ INPAGE_TOOLS_JS = r"""
 
     const style = document.createElement('style');
     style.textContent = `
+      :host { cursor: default !important; }
       * { box-sizing: border-box; font-family: Segoe UI, system-ui, sans-serif; }
+      input, textarea { cursor: text; }
       .rep-pill {
         position: fixed; bottom: 18px; right: 18px; z-index: 2147483647;
         background: #12151c; color: #e8ebf0; border: 1px solid #2a303c;
@@ -150,8 +152,9 @@ INPAGE_TOOLS_JS = r"""
         width: 320px; background: #0b0d12; color: #e8ebf0;
         border: 1px solid #2a303c; border-radius: 12px; padding: 14px;
         box-shadow: 0 10px 25px rgba(0,0,0,0.5); display: none; flex-direction: column; gap: 10px;
-        font-size: 13px;
+        font-size: 13px; max-height: calc(100vh - 76px); overflow: auto; overscroll-behavior: contain;
       }
+      .rep-panel > * { flex: none; }
       .rep-panel.open { display: flex; }
       .rep-panel-header {
         display: flex; justify-content: space-between; align-items: center;
@@ -193,6 +196,7 @@ INPAGE_TOOLS_JS = r"""
         background: #0b0d12; border: 1px solid #2a303c; border-radius: 12px;
         width: 100%; max-width: 520px; padding: 18px; color: #e8ebf0;
         box-shadow: 0 15px 30px rgba(0,0,0,0.6); display: flex; flex-direction: column; gap: 12px;
+        max-height: calc(100vh - 40px); overflow: auto; overscroll-behavior: contain;
       }
       textarea, input[type="text"] {
         width: 100%; background: #1a1e27; color: #e8ebf0; border: 1px solid #3a4250;
@@ -200,8 +204,8 @@ INPAGE_TOOLS_JS = r"""
       }
       textarea:focus, input[type="text"]:focus { outline: 2px solid #c6f135; }
       .rep-row { display: flex; gap: 8px; justify-content: flex-end; }
-      .rep-wide { max-width: 680px; max-height: 86vh; }
-      .rep-list { overflow: auto; display: flex; flex-direction: column; gap: 8px; min-height: 80px; }
+      .rep-wide { max-width: 680px; max-height: 86vh; overflow: hidden; }
+      .rep-list { flex: 1 1 auto; overscroll-behavior: contain; overflow: auto; display: flex; flex-direction: column; gap: 8px; min-height: 80px; }
       .rep-item { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; }
       .rep-item small { grid-column: 1 / -1; color: #8b94a5; font-size: 11px; overflow-wrap: anywhere; }
       .rep-add { display: grid; grid-template-columns: 1fr 1fr auto; gap: 6px; }
@@ -305,7 +309,7 @@ INPAGE_TOOLS_JS = r"""
       pill.innerHTML = pickingText ? '<span>✏️</span><span>Click text or 3D (Esc)</span>'
                                    : '<span>✕</span><span>Click an element (Esc)</span>';
       hl.style.display = 'block';
-      document.body.style.cursor = 'crosshair';
+      window.__replicator_control.showCursor('crosshair');
     }
 
     function stopZapping() {
@@ -313,7 +317,7 @@ INPAGE_TOOLS_JS = r"""
       pill.classList.remove('active');
       pill.innerHTML = LOGO;
       hl.style.display = 'none';
-      document.body.style.cursor = '';
+      window.__replicator_control.showCursor(null);
       hoveredEl = null;
     }
 

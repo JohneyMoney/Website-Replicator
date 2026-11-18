@@ -255,8 +255,25 @@ CONTROL_RUNTIME_JS = r"""
     let left = 6;
     const t = setInterval(() => { n.visible = !n.visible; if (--left <= 0) { clearInterval(t); n.visible = was; } }, 130);
   }
+  // Many sites hide the real pointer and draw their own, which stops moving under our tools.
+  function showCursor(kind) {
+    let s = document.getElementById('__replicator_cursor');
+    if (!kind) { if (s) s.remove(); return; }
+    if (!s) {
+      s = document.createElement('style');
+      s.id = '__replicator_cursor';
+      document.documentElement.append(s);
+    }
+    s.textContent = ':root,:root *,:root *::before,:root *::after{cursor:' + kind + ' !important}';
+  }
+  // Smooth-scroll scripts cancel every wheel event. This runs first, so our panels keep theirs.
+  for (const type of ['wheel', 'mousewheel', 'DOMMouseScroll', 'touchstart', 'touchmove'])
+    addEventListener(type, e => {
+      if (e.composedPath().some(n => n && (n.id === '__replicator_ui_host' || n.id === '__replicator_editor_host')))
+        e.stopImmediatePropagation();
+    }, {capture: true, passive: true});
   window.__replicator_control = {
-    page, watch, applyNow: applyDom, tree, read3d, textures3d, texts3d, flash, resolve, pathOf,
+    page, watch, showCursor, applyNow: applyDom, tree, read3d, textures3d, texts3d, flash, resolve, pathOf,
     views: () => views,
     preview(op) { liveOp = op; },
     get ops() { return ops; },
@@ -913,9 +930,12 @@ EDITOR_JS = r"""
     document.documentElement.append(host);
     root = host.attachShadow({mode: 'open'});
     root.append(h('style', {}, `
+      :host{cursor:default !important}
       *{box-sizing:border-box;font:12px Segoe UI,system-ui,sans-serif}
+      input,textarea{cursor:text}input[type=color],input[type=range],input[type=checkbox],input[type=file]{cursor:pointer}
       .panel{position:fixed;top:0;bottom:0;width:360px;z-index:2147483646;background:#0b0d12;color:#e8ebf0;display:flex;flex-direction:column;box-shadow:0 0 24px #0008}
       .right{right:0}.left{left:0}.bar{display:flex;gap:5px;padding:8px;border-bottom:1px solid #2a303c;flex-wrap:wrap}
+      .body,.tree{overscroll-behavior:contain}
       .pane{flex:none;height:36vh;min-height:90px;max-height:75vh;resize:vertical;overflow:hidden;display:flex;flex-direction:column;gap:5px;padding:8px;border-bottom:1px solid #2a303c;background:#12151c}
       .body{flex:1;min-height:0;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:8px}
       button{background:#1a1e27;color:#e8ebf0;border:1px solid #2a303c;border-radius:6px;padding:6px 8px;cursor:pointer}
@@ -947,7 +967,7 @@ EDITOR_JS = r"""
       h('div', {class: 'bar'},
         h('button', {'data-tab': 'page', onclick: () => { tab = 'page'; filterText = ''; reveal = true; draw(); }}, 'Page'),
         h('button', {'data-tab': '3d', onclick: () => { tab = '3d'; filterText = ''; reveal = true; draw(); }}, '3D'),
-        h('button', {'data-k': 'interact', onclick: () => { interact = !interact; draw(); }}, ''),
+        h('button', {'data-k': 'interact', onclick: () => { interact = !interact; pointer(); draw(); }}, ''),
         h('button', {onclick: () => { side = side === 'right' ? 'left' : 'right'; remember(true); draw(); }}, '⇄'),
         h('button', {'data-k': 'undo', onclick: () => jump(past, future)}, 'Undo'),
         h('button', {'data-k': 'redo', onclick: () => jump(future, past)}, 'Redo'),
@@ -964,17 +984,24 @@ EDITOR_JS = r"""
     const pill = document.getElementById('__replicator_ui_host');
     if (pill) pill.style.display = display;
   }
+  function pointer() {
+    C().showCursor(!active ? null : interact ? 'auto' : 'default');
+    if (active && document.pointerLockElement && document.exitPointerLock) document.exitPointerLock();
+  }
+  document.addEventListener('pointerlockchange', () => { if (active) pointer(); });
   function open() {
     if (!host) build();
     host.style.display = '';
     setPill('none');
     active = true;
+    pointer();
     remember(true);
     draw();
     requestAnimationFrame(tick);
   }
   function close() {
     active = false;
+    pointer();
     host.style.display = 'none';
     C().preview(null);
     setPill('');
