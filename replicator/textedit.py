@@ -37,6 +37,14 @@ TEXT_RUNTIME_JS = r"""
     const s = String(value).trim();
     if (s.length >= 2 && s.length < 400 && drawn.size < 800 && /\p{L}/u.test(s)) drawn.set(s, 1);
   }
+  const byCanvas = new WeakMap();
+  function note(canvas, value) {
+    const s = String(value).trim();
+    if (!canvas || s.length < 2 || s.length >= 400 || !/\p{L}/u.test(s)) return;
+    let set = byCanvas.get(canvas);
+    if (!set) byCanvas.set(canvas, set = new Set());
+    if (set.size < 100) set.add(s);
+  }
   // MSDF text is often laid out in a worker: {text} or {options: {text}}.
   const scene = new Map();
   if (window.Worker) {
@@ -66,7 +74,7 @@ TEXT_RUNTIME_JS = r"""
     for (const name of ['fillText', 'strokeText', 'measureText']) {
       const native = C.prototype[name];
       C.prototype[name] = function (text, ...rest) {
-        if (name !== 'measureText') record(text);
+        if (name !== 'measureText') { record(text); note(this.canvas, text); }
         return native.call(this, rules.length ? apply(text) : text, ...rest);
       };
     }
@@ -97,7 +105,8 @@ TEXT_RUNTIME_JS = r"""
     if (document.readyState !== 'loading') fixTree(document);
   }
   window.__replicator_text = {apply, watch, nativeCanvas,
-                              drawn: () => [...drawn.keys()], scene: () => [...scene.keys()]};
+                              drawn: () => [...drawn.keys()], scene: () => [...scene.keys()],
+                              canvasText: c => [...(byCanvas.get(c) || [])]};
   watch();
 })();
 """

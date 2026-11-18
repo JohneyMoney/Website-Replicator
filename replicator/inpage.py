@@ -58,9 +58,9 @@ INPAGE_TOOLS_JS = r"""
       '• Select an element in DevTools Elements tab and run: %czap($0)%c\n' +
       '• Or run: %cunlockScroll()%c to fix frozen page scrolling\n' +
       '• Press %cAlt+Z%c on the page to start Point-and-Click Zapper',
-      'background:#2563eb;color:#fff;font-weight:bold;padding:2px 6px;border-radius:4px', '',
-      'color:#38bdf8;font-weight:bold', '',
-      'color:#38bdf8;font-weight:bold', '',
+      'background:#c6f135;color:#fff;font-weight:bold;padding:2px 6px;border-radius:4px', '',
+      'color:#c6f135;font-weight:bold', '',
+      'color:#c6f135;font-weight:bold', '',
       'background:#374151;color:#fff;padding:1px 4px;border-radius:3px', ''
     );
   } catch(_) {}
@@ -132,51 +132,52 @@ INPAGE_TOOLS_JS = r"""
 
     const style = document.createElement('style');
     style.textContent = `
-      * { box-sizing: border-box; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+      * { box-sizing: border-box; font-family: Segoe UI, system-ui, sans-serif; }
       .rep-pill {
         position: fixed; bottom: 18px; right: 18px; z-index: 2147483647;
-        background: #181b22; color: #f1f5f9; border: 1px solid #334155;
-        border-radius: 20px; padding: 7px 14px; font-size: 13px; font-weight: 600;
+        background: #12151c; color: #e8ebf0; border: 1px solid #2a303c;
+        border-radius: 6px; padding: 8px 13px; font-size: 13px; font-weight: 600;
         cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,0.4);
         display: flex; align-items: center; gap: 6px; user-select: none;
         transition: transform 0.15s, background 0.15s;
       }
-      .rep-pill:hover { background: #2563eb; transform: translateY(-1px); }
-      .rep-pill.active { background: #dc2626; border-color: #ef4444; }
+      .rep-pill:hover { background: #c6f135; color: #0b0d12; transform: translateY(-1px); }
+      .rep-pill:hover svg rect:last-child { fill: #0b0d12; }
+      .rep-pill.active { background: #ff6b5e; border-color: #ff6b5e; color: #0b0d12; }
 
       .rep-panel {
         position: fixed; bottom: 58px; right: 18px; z-index: 2147483647;
-        width: 320px; background: #0f172a; color: #e2e8f0;
-        border: 1px solid #334155; border-radius: 12px; padding: 14px;
+        width: 320px; background: #0b0d12; color: #e8ebf0;
+        border: 1px solid #2a303c; border-radius: 12px; padding: 14px;
         box-shadow: 0 10px 25px rgba(0,0,0,0.5); display: none; flex-direction: column; gap: 10px;
         font-size: 13px;
       }
       .rep-panel.open { display: flex; }
       .rep-panel-header {
         display: flex; justify-content: space-between; align-items: center;
-        font-weight: 700; font-size: 14px; color: #f8fafc; border-bottom: 1px solid #1e293b; padding-bottom: 8px;
+        font-weight: 700; font-size: 14px; color: #e8ebf0; border-bottom: 1px solid #1a1e27; padding-bottom: 8px;
       }
       .rep-btn {
-        background: #1e293b; color: #f1f5f9; border: 1px solid #334155;
+        background: #1a1e27; color: #e8ebf0; border: 1px solid #2a303c;
         border-radius: 6px; padding: 8px 10px; font-size: 12px; font-weight: 600;
         cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px;
         transition: background 0.12s;
       }
-      .rep-btn:hover { background: #334155; }
-      .rep-btn-primary { background: #2563eb; border-color: #3b82f6; }
-      .rep-btn-primary:hover { background: #1d4ed8; }
-      .rep-btn-danger { background: #991b1b; border-color: #dc2626; }
-      .rep-btn-danger:hover { background: #7f1d1d; }
+      .rep-btn:hover { background: #2a303c; }
+      .rep-btn-primary { background: #c6f135; border-color: #c6f135; color: #0b0d12; }
+      .rep-btn-primary:hover { background: #d8ff57; }
+      .rep-btn-danger { background: #3a1b19; border-color: #ff6b5e; }
+      .rep-btn-danger:hover { background: #3a1b19; }
 
       /* Highlighter Overlay */
       .rep-hl {
         position: fixed; pointer-events: none; z-index: 2147483640;
-        border: 2px solid #ef4444; background: rgba(239, 68, 68, 0.2);
+        border: 2px solid #ff6b5e; background: rgba(239, 68, 68, 0.2);
         transition: top 0.05s, left 0.05s, width 0.05s, height 0.05s;
         display: none; border-radius: 2px;
       }
       .rep-hl-tag {
-        position: absolute; top: -22px; left: 0; background: #ef4444; color: #fff;
+        position: absolute; top: -22px; left: 0; background: #ff6b5e; color: #fff;
         font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 3px;
         white-space: nowrap; pointer-events: none;
       }
@@ -189,37 +190,38 @@ INPAGE_TOOLS_JS = r"""
       }
       .rep-modal.open { display: grid; }
       .rep-modal-box {
-        background: #0f172a; border: 1px solid #334155; border-radius: 12px;
-        width: 100%; max-width: 520px; padding: 18px; color: #e2e8f0;
+        background: #0b0d12; border: 1px solid #2a303c; border-radius: 12px;
+        width: 100%; max-width: 520px; padding: 18px; color: #e8ebf0;
         box-shadow: 0 15px 30px rgba(0,0,0,0.6); display: flex; flex-direction: column; gap: 12px;
       }
       textarea, input[type="text"] {
-        width: 100%; background: #1e293b; color: #f8fafc; border: 1px solid #475569;
+        width: 100%; background: #1a1e27; color: #e8ebf0; border: 1px solid #3a4250;
         border-radius: 6px; padding: 8px; font-family: Consolas, monospace; font-size: 12px;
       }
-      textarea:focus, input[type="text"]:focus { outline: 2px solid #2563eb; }
+      textarea:focus, input[type="text"]:focus { outline: 2px solid #c6f135; }
       .rep-row { display: flex; gap: 8px; justify-content: flex-end; }
       .rep-wide { max-width: 680px; max-height: 86vh; }
       .rep-list { overflow: auto; display: flex; flex-direction: column; gap: 8px; min-height: 80px; }
       .rep-item { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; }
-      .rep-item small { grid-column: 1 / -1; color: #94a3b8; font-size: 11px; overflow-wrap: anywhere; }
+      .rep-item small { grid-column: 1 / -1; color: #8b94a5; font-size: 11px; overflow-wrap: anywhere; }
       .rep-add { display: grid; grid-template-columns: 1fr 1fr auto; gap: 6px; }
       .rep-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
-      .rep-card { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: #94a3b8; min-width: 0; }
-      .rep-card img { width: 100%; height: 100px; object-fit: contain; background: #1e293b; border-radius: 6px; }
+      .rep-card { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: #8b94a5; min-width: 0; }
+      .rep-card img { width: 100%; height: 100px; object-fit: contain; background: #1a1e27; border-radius: 6px; }
       .rep-card span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .rep-card canvas, .rep-card video { width: 100%; height: 100px; object-fit: contain; background: #1e293b; border-radius: 6px; }
+      .rep-card canvas, .rep-card video { width: 100%; height: 100px; object-fit: contain; background: #1a1e27; border-radius: 6px; }
       .rep-card audio { width: 100%; height: 34px; }
-      .rep-file { height: 100px; display: grid; place-items: center; background: #1e293b; border-radius: 6px; font-size: 13px; font-weight: 700; color: #cbd5e1; }
+      .rep-file { height: 100px; display: grid; place-items: center; background: #1a1e27; border-radius: 6px; font-size: 13px; font-weight: 700; color: #e8ebf0; }
       .rep-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
-      .rep-tabs .on { background: #2563eb; border-color: #3b82f6; }
+      .rep-tabs .on { background: #c6f135; border-color: #c6f135; color: #0b0d12; }
     `;
     shadow.appendChild(style);
 
     // Pill
+    const LOGO = '<svg width="15" height="15" viewBox="0 0 15 15" aria-hidden="true"><rect x=".75" y=".75" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".6"/><rect x="5" y="5" width="10" height="10" fill="#c6f135"/></svg><span>Replicator</span>';
     const pill = document.createElement('div');
     pill.className = 'rep-pill';
-    pill.innerHTML = '<span>⚡</span><span>Replicator</span>';
+    pill.innerHTML = LOGO;
     shadow.appendChild(pill);
 
     // Panel
@@ -227,19 +229,19 @@ INPAGE_TOOLS_JS = r"""
     panel.className = 'rep-panel';
     panel.innerHTML = `
       <div class="rep-panel-header">
-        <span>⚡ Replicator Tools</span>
-        <span id="rep_close" style="cursor:pointer;color:#94a3b8">&times;</span>
+        <span>Replicator Tools</span>
+        <span id="rep_close" style="cursor:pointer;color:#8b94a5">&times;</span>
       </div>
-      <button class="rep-btn rep-btn-primary" id="rep_editor_btn">🎛 Full Editor (Alt+E)</button>
-      <button class="rep-btn" id="rep_text_btn">✏️ Edit Text, also 3D/WebGL (Alt+T)</button>
-      <button class="rep-btn" id="rep_images_btn">🖼 Replace Images, Video, Audio &amp; More</button>
-      <button class="rep-btn" id="rep_zap_btn">🎯 Zap Element (Alt+Z)</button>
-      <button class="rep-btn" id="rep_unlock_btn">🔓 Unlock Page Scroll</button>
-      <button class="rep-btn" id="rep_edit_css_btn">📋 Edit CSS Overrides</button>
-      <button class="rep-btn" id="rep_edit_js_btn">⚙ JS Function Mocks</button>
-      <button class="rep-btn" id="rep_block_url_btn">🚫 Block Script / URL</button>
-      <button class="rep-btn" id="rep_undo_btn">↺ Undo Last Zap</button>
-      <div style="font-size:11px;color:#94a3b8;line-height:1.4">
+      <button class="rep-btn rep-btn-primary" id="rep_editor_btn">Inspect and Edit  ·  Alt+E</button>
+      <button class="rep-btn" id="rep_text_btn">Edit Text and 3D Text  ·  Alt+T</button>
+      <button class="rep-btn" id="rep_images_btn">Replace Images, Video, Audio &amp; More</button>
+      <button class="rep-btn" id="rep_zap_btn">Zap Element  ·  Alt+Z</button>
+      <button class="rep-btn" id="rep_unlock_btn">Unlock Page Scroll</button>
+      <button class="rep-btn" id="rep_edit_css_btn">Edit CSS Overrides</button>
+      <button class="rep-btn" id="rep_edit_js_btn">JS Function Mocks</button>
+      <button class="rep-btn" id="rep_block_url_btn">Block Script / URL</button>
+      <button class="rep-btn" id="rep_undo_btn">Undo Last Zap</button>
+      <div style="font-size:11px;color:#8b94a5;line-height:1.4">
         Tip: In DevTools Console type <code>zap($0)</code> on any inspected element!
       </div>
     `;
@@ -259,7 +261,7 @@ INPAGE_TOOLS_JS = r"""
     modal.innerHTML = `
       <div class="rep-modal-box">
         <div style="font-weight:700;font-size:15px" id="rep_modal_title">Modal Title</div>
-        <div id="rep_modal_desc" style="font-size:12px;color:#94a3b8"></div>
+        <div id="rep_modal_desc" style="font-size:12px;color:#8b94a5"></div>
         <textarea id="rep_modal_text" rows="8"></textarea>
         <div class="rep-row">
           <button class="rep-btn" id="rep_modal_cancel">Cancel</button>
@@ -271,12 +273,13 @@ INPAGE_TOOLS_JS = r"""
 
     // Toast
     const toast = document.createElement('div');
-    toast.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#10b981;color:#fff;padding:8px 16px;border-radius:8px;font-size:13px;font-weight:600;z-index:2147483647;display:none;box-shadow:0 4px 12px rgba(0,0,0,0.3);';
+    toast.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#c6f135;color:#fff;padding:8px 16px;border-radius:8px;font-size:13px;font-weight:600;z-index:2147483647;display:none;box-shadow:0 4px 12px rgba(0,0,0,0.3);';
     shadow.appendChild(toast);
 
     function showToast(msg, isErr) {
       toast.textContent = msg;
-      toast.style.background = isErr ? '#ef4444' : '#10b981';
+      toast.style.background = isErr ? '#ff6b5e' : '#c6f135';
+      toast.style.color = '#0b0d12';
       toast.style.display = 'block';
       setTimeout(() => { toast.style.display = 'none'; }, 2400);
     }
@@ -308,7 +311,7 @@ INPAGE_TOOLS_JS = r"""
     function stopZapping() {
       zapping = false;
       pill.classList.remove('active');
-      pill.innerHTML = '<span>⚡</span><span>Replicator</span>';
+      pill.innerHTML = LOGO;
       hl.style.display = 'none';
       document.body.style.cursor = '';
       hoveredEl = null;
@@ -484,7 +487,7 @@ INPAGE_TOOLS_JS = r"""
     const editorTitle = mk('div');
     editorTitle.style.cssText = 'font-weight:700;font-size:15px';
     const editorDesc = mk('div');
-    editorDesc.style.cssText = 'font-size:12px;color:#94a3b8;line-height:1.4';
+    editorDesc.style.cssText = 'font-size:12px;color:#8b94a5;line-height:1.4';
     const editorTools = mk('div');
     editorTools.style.cssText = 'display:flex;flex-direction:column;gap:8px';
     const editorList = mk('div', 'rep-list');
